@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Donor Dedup Admin — Oregon Campaign Finance</title>
+  <link rel="stylesheet" href="../style.css" />
+  <link rel="stylesheet" href="../recommend.css" />
+  <link rel="stylesheet" href="donors.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">
+      Donor identity admin &middot; review and merge duplicate donor identities
+    </p>
+  </div>
+</header>
+
+<nav class="tab-nav tools-nav" aria-label="Campaign tools">
+  <div class="tab-nav-inner">
+    <a class="tab-btn tab-link" href="/">← Dashboard</a>
+    <a class="tab-btn" href="/recommend">Recommend</a>
+    <a class="tab-btn" href="/admin/lobbyists" data-needs-admin hidden>Lobbyists</a>
+    <a class="tab-btn active" href="/admin/donors" aria-current="page">Donor admin</a>
+    <span class="tab-sep tools-account" aria-hidden="true" hidden></span>
+    <span class="tools-account" hidden>
+      <span class="tools-user" id="user-info"></span>
+      <button type="button" class="btn-small" id="sign-out-btn">Sign Out</button>
+    </span>
+  </div>
+</nav>
+
+<main id="app-content" hidden>
+
+  <div class="admin-tabs">
+    <button class="admin-tab-btn active" data-admin-tab="tab-pending">Pending Review</button>
+    <button class="admin-tab-btn" data-admin-tab="tab-active-merges">Active Merges</button>
+    <button class="admin-tab-btn" data-admin-tab="tab-manual-merge">Manual Merge</button>
+    <button class="admin-tab-btn" data-admin-tab="tab-entity-merge">Entity Merges</button>
+    <button class="admin-tab-btn" data-admin-tab="tab-rejected">Rejected Pairs</button>
+    <button class="admin-tab-btn" data-admin-tab="tab-candidate-links">Candidate Links</button>
+    <button class="admin-tab-btn" data-admin-tab="tab-balances">Balance Discrepancies</button>
+  </div>
+
+  <!-- Tab: Pending Review (existing content) -->
+  <div id="tab-pending" class="admin-tab active">
+
+    <!-- Pending merges from review_queue.json -->
+    <section class="admin-section">
+      <h2>Pending Duplicate Pairs</h2>
+      <p class="section-desc">Probable duplicates from fuzzy matching (score 80–95). Click merge to combine, or reject to dismiss.</p>
+      <div class="review-controls">
+        <input type="search" id="review-search" class="table-search" placeholder="Filter pairs…" />
+        <span id="review-count" class="review-count"></span>
+      </div>
+      <div id="pending-list" class="cluster-list"></div>
+      <p id="pending-empty" class="empty-msg" hidden>No pending pairs.</p>
+    </section>
+
+    <!-- Merge history -->
+    <section class="admin-section">
+      <h2>Merge History</h2>
+      <p class="section-desc">Previously merged donors. Merges can be undone.</p>
+      <div id="merge-log" class="merge-log"></div>
+      <p id="log-empty" class="empty-msg" hidden>No merge history yet.</p>
+    </section>
+
+    <!-- Manual search + merge -->
+    <section class="admin-section">
+      <h2>Manual Donor Search</h2>
+      <div class="search-box" style="max-width:400px">
+        <input type="text" id="donor-search" placeholder="Search donor name…" />
+      </div>
+      <div id="donor-search-results" class="donor-search-results"></div>
+    </section>
+
+  </div>
+
+
+  <!-- Tab: Candidate Links -->
+  <div id="tab-candidate-links" class="admin-tab" hidden>
+    <section class="admin-section">
+      <h2>Candidates Without a Committee</h2>
+      <p class="section-desc">
+        Filed candidates the matcher could not pair with a committee. Most genuinely
+        have none — that is real information, not an error — so confirming "no committee"
+        is a decision worth recording, and takes them off this list.
+        Anything linked here overrides the matcher and survives the weekly rebuild.
+      </p>
+      <div class="toolbar" style="margin-bottom:12px">
+        <input type="search" id="cl-filter" class="table-search" placeholder="Filter candidates…" />
+        <span id="cl-count" class="section-desc"></span>
+      </div>
+      <div id="cl-list"></div>
+    </section>
+
+    <section class="admin-section">
+      <h2>Recorded Decisions</h2>
+      <p class="section-desc">Links and "no committee" confirmations already in effect.</p>
+      <div id="cl-decisions"></div>
+    </section>
+  </div>
+
+  <!-- Tab: Balance Discrepancies -->
+  <div id="tab-balances" class="admin-tab" hidden>
+    <section class="admin-section">
+      <h2>Cash on Hand vs ORESTAR</h2>
+      <p class="section-desc">
+        Each discrepancy compares the app balance already published from an exact,
+        fingerprinted transaction snapshot with the ORESTAR ending balance read during
+        its matching capture window. If either side changes afterward, the pair moves to
+        “needs refresh” instead of remaining an active discrepancy.
+      </p>
+      <p class="section-desc">
+        <b>Dormant</b> committees have no transactions in the year ORESTAR reports.
+        ORESTAR carries their balance forward anyway, so a gap there usually means missing
+        history rather than something wrong today.
+      </p>
+      <div class="toolbar" style="margin-bottom:12px">
+        <input type="search" id="bd-filter" class="table-search" placeholder="Filter committees…" />
+        <select id="bd-min" class="bd-select">
+          <option value="0.01">Any difference</option>
+          <option value="1000" selected>Over $1,000</option>
+          <option value="10000">Over $10,000</option>
+          <option value="100000">Over $100,000</option>
+        </select>
+        <select id="bd-kind" class="bd-select">
+          <option value="all">All committees</option>
+          <option value="active">Actively filing only</option>
+          <option value="dormant">Dormant only</option>
+        </select>
+        <select id="bd-status" class="bd-select">
+          <option value="actionable">Current discrepancies</option>
+          <option value="refresh">Pairs needing refresh</option>
+          <option value="unpaired">Unpaired / unusable</option>
+          <option value="nonactionable">Trailing blank / likely closed</option>
+          <option value="all">All audit states</option>
+        </select>
+        <span id="bd-count" class="section-desc"></span>
+      </div>
+      <div id="bd-list"></div>
+    </section>
+  </div>
+
+  <!-- Tab: Active Merges -->
+  <div id="tab-active-merges" class="admin-tab" hidden>
+    <section class="admin-section">
+      <h2>Active Merges</h2>
+      <p class="section-desc">All donor name merges currently in effect, from both entity_map.json and admin decisions.</p>
+      <input type="search" id="merge-search" class="table-search" placeholder="Search merges…" />
+      <div id="merge-list"></div>
+    </section>
+  </div>
+
+  <!-- Tab: Manual Merge -->
+  <div id="tab-manual-merge" class="admin-tab" hidden>
+    <section class="admin-section">
+      <h2>Create Manual Merge</h2>
+      <p class="section-desc">Search for two donor names and merge them under a single canonical identity.</p>
+      <div class="merge-creator">
+        <div class="merge-input-group">
+          <label>Donor A</label>
+          <input type="text" id="merge-donor-a" placeholder="Search donor name…" autocomplete="off" />
+          <div id="merge-suggest-a" class="merge-suggestions" hidden></div>
+        </div>
+        <span class="merge-arrow">→</span>
+        <div class="merge-input-group">
+          <label>Keep as (canonical name)</label>
+          <input type="text" id="merge-donor-b" placeholder="Search or type canonical name…" autocomplete="off" />
+          <div id="merge-suggest-b" class="merge-suggestions" hidden></div>
+        </div>
+        <button id="merge-create-btn" class="btn-primary" disabled>Merge</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Tab: Entity Merges (address-aware) -->
+  <div id="tab-entity-merge" class="admin-tab" hidden>
+    <section class="admin-section">
+      <h2>Merge Donor Entities</h2>
+      <p class="section-desc">
+        For donors split across <strong>multiple addresses</strong> — e.g. one company
+        filing from several offices. Search resolved entities, compare their addresses
+        and totals, then merge. Decisions are keyed on name+address, so they survive
+        every re-run of the resolver.
+      </p>
+
+      <div class="em-picker">
+        <div class="em-side">
+          <label for="em-search-a">Entity A — destination</label>
+          <div class="em-box">
+            <input type="text" id="em-search-a" placeholder="Search donors — e.g. Philip Morris…" autocomplete="off" />
+            <ul class="em-results" id="em-results-a" hidden></ul>
+          </div>
+          <div class="em-card" id="em-card-a"></div>
+        </div>
+        <div class="em-side">
+          <label for="em-search-b">Entity B — select donors to merge into A</label>
+          <div class="em-box">
+            <input type="text" id="em-search-b" placeholder="Search donors…" autocomplete="off" />
+            <ul class="em-results" id="em-results-b" hidden></ul>
+          </div>
+          <div class="em-card" id="em-card-b"></div>
+        </div>
+      </div>
+
+      <div class="em-actions">
+        <button id="em-merge-btn" class="btn-primary" disabled>Merge these entities</button>
+        <button id="em-separate-btn" class="btn-secondary" disabled>Mark as separate</button>
+        <span class="em-status" id="em-status"></span>
+      </div>
+      <p class="section-desc em-note">
+        Saved merges apply immediately across donor views. Refresh other open pages to see the change.
+      </p>
+    </section>
+
+    <section class="admin-section">
+      <h2>Recorded Entity Decisions</h2>
+      <input type="search" id="em-filter" class="table-search" placeholder="Filter decisions…" />
+      <div id="em-list"></div>
+    </section>
+  </div>
+
+  <!-- Tab: Rejected Pairs -->
+  <div id="tab-rejected" class="admin-tab" hidden>
+    <section class="admin-section">
+      <h2>Rejected Pairs</h2>
+      <p class="section-desc">Pairs that were explicitly rejected. Use "Reconsider" to move back to pending review.</p>
+      <div id="rejected-list"></div>
+      <p id="rejected-empty" class="empty-msg" hidden>No rejected pairs.</p>
+    </section>
+  </div>
+
+</main>
+
+<footer>
+  <p>Oregon Campaign Finance — Donor Identity Admin</p>
+</footer>
+
+<script src="../lib/donor-names.js"></script>
+  <script src="../lib/supabase.js"></script>
+<script src="donors.js"></script>
+</body>
+</html>

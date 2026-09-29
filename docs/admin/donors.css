@@ -1,0 +1,387 @@
+/* ── Admin donor dedup styles ───────────────────────────────────────────── */
+
+.admin-section {
+  margin-bottom: 32px;
+}
+.admin-section h2 {
+  font-size: 1.1rem;
+  margin-bottom: 8px;
+}
+.empty-msg {
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  padding: 16px 0;
+}
+
+/* ── Cluster cards ──────────────────────────────────────────────────────── */
+.cluster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cluster-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  box-shadow: var(--shadow);
+}
+.cluster-key {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 8px;
+}
+.cluster-names {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.pair-evidence {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  background: var(--color-surface-alt, #f7fafc);
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin: 4px 0 8px;
+}
+.cluster-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+.cluster-name input[type="radio"] { margin: 0; }
+.cluster-evidence {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--color-bg);
+  border-radius: var(--radius);
+}
+.cluster-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ── Merge log ──────────────────────────────────────────────────────────── */
+.merge-log {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.merge-entry {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+.merge-entry .merge-info { flex: 1; }
+.merge-entry .merge-names {
+  font-weight: 600;
+  color: var(--color-text);
+}
+.merge-entry .merge-date {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+/* ── Donor search results ───────────────────────────────────────────────── */
+.donor-search-results {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.donor-result-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 0.88rem;
+}
+.donor-result-row:hover { border-color: var(--color-accent); }
+.donor-result-name { font-weight: 500; }
+.donor-result-meta {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+/* ── Admin tabs ────────────────────────────────────────────────────────── */
+.admin-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 24px;
+}
+.admin-tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 12px 20px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  margin-bottom: -1px;
+}
+.admin-tab-btn:hover { color: var(--color-text); }
+.admin-tab-btn.active {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+  font-weight: 600;
+}
+
+/* ── Merge Manager sections ────────────────────────────────────────────── */
+.merge-section {
+  margin-bottom: 32px;
+}
+.merge-section h3 {
+  font-size: 1.05rem;
+  margin-bottom: 12px;
+}
+
+/* ── Merge creator row ─────────────────────────────────────────────────── */
+.merge-creator {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.merge-input-group {
+  flex: 1;
+  min-width: 200px;
+  position: relative;
+}
+.merge-input-group label {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+}
+.merge-input-group input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 0.88rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.merge-input-group input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
+  outline: none;
+}
+.merge-arrow {
+  font-size: 1.4rem;
+  color: var(--color-text-muted);
+  padding-bottom: 6px;
+  flex-shrink: 0;
+}
+
+/* ── Autocomplete suggestions ──────────────────────────────────────────── */
+.merge-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 2px;
+}
+.merge-suggest-item {
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.merge-suggest-item:hover {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+}
+/* Already merged away — flagged, not disabled: the name it was merged into
+   stays available so further aliases can still be merged onto it. */
+.merge-suggest-merged {
+  opacity: 0.72;
+}
+.merge-suggest-note {
+  display: block;
+  font-size: 0.72rem;
+  color: #a16207;
+  margin-top: 1px;
+}
+
+/* ── Source badges ──────────────────────────────────────────────────────── */
+.merge-source-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.badge-gray {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+.badge-blue {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+}
+
+/* ── Merge table ───────────────────────────────────────────────────────── */
+.merge-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-top: 12px;
+}
+.merge-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  border-bottom: 2px solid var(--color-border);
+}
+.merge-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border-light, var(--color-border));
+  vertical-align: middle;
+}
+.merge-table tbody tr:hover {
+  background: var(--color-surface-alt, #f9fafb);
+}
+.merge-arrow-cell {
+  color: var(--color-text-muted);
+  text-align: center;
+  width: 30px;
+}
+
+/* ── Merge action buttons ──────────────────────────────────────────────── */
+.merge-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* ── Entity Merges (address-aware) ─────────────────────────────────────── */
+.em-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin: 1rem 0; }
+@media (max-width: 780px) { .em-picker { grid-template-columns: 1fr; } }
+.em-side label { display: block; font-weight: 600; font-size: .85rem; margin-bottom: .3rem; }
+.em-box { position: relative; }
+.em-box input { width: 100%; padding: .5rem .6rem; border: 1px solid #ccc; border-radius: 6px; font-size: .9rem; }
+.em-results {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 40; background: #fff;
+  border: 1px solid #e2e8f0; border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.08);
+  max-height: 320px; overflow-y: auto; list-style: none; margin: 3px 0 0; padding: 0;
+}
+.em-results li { padding: .45rem .6rem; cursor: pointer; }
+.em-results li:hover { background: #ebf4ff; }
+.em-r-name { font-weight: 600; font-size: .88rem; }
+.em-r-meta { color: #718096; font-size: .76rem; }
+.em-card:empty { display: none; }
+.em-card { margin-top: .6rem; border: 1px solid #e2e8f0; border-radius: 8px; padding: .7rem; background: #f7fafc; }
+.em-card-name { font-weight: 700; }
+.em-card-meta { color: #4a5568; font-size: .8rem; margin-bottom: .4rem; }
+.em-card-nums { display: flex; gap: .9rem; font-size: .8rem; font-variant-numeric: tabular-nums; margin-bottom: .5rem; }
+.em-addr-title { font-size: .75rem; text-transform: uppercase; letter-spacing: .03em; color: #718096; }
+.em-addr { font-size: .78rem; font-family: ui-monospace, Menlo, monospace; color: #2d3748; }
+.em-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: .5rem; }
+.em-status { color: #4a5568; font-size: .84rem; }
+.em-note { font-style: italic; }
+.em-row { display: flex; justify-content: space-between; align-items: flex-start;
+          gap: 1rem; padding: .5rem 0; border-bottom: 1px solid #edf2f7; }
+.em-badge { display: inline-block; border-radius: 4px; font-size: .68rem; text-transform: uppercase;
+            padding: 1px 6px; margin-right: 6px; color: #fff; }
+.em-badge.em-merged { background: #38a169; }
+.em-badge.em-separate { background: #718096; }
+
+/* Candidate → committee linking */
+.cl-suggest { margin: 8px 0; }
+.cl-hit {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 6px 0; border-top: 1px solid #edf2f7;
+}
+.cl-hit span { font-size: .85rem; }
+.cl-results { max-height: 260px; overflow-y: auto; }
+.cl-none { margin-top: 8px; }
+
+/* ── Balance discrepancies ─────────────────────────────────────────── */
+.bd-select {
+  padding: 6px 10px; border: 1px solid var(--border, #cbd5e0);
+  border-radius: 6px; font-size: .85rem; background: #fff; color: #4a5568;
+}
+.bd-table { width: 100%; border-collapse: collapse; font-size: .87rem; }
+.bd-table th, .bd-table td { padding: 7px 10px; border-bottom: 1px solid #edf2f7; text-align: left; }
+.bd-table th { font-weight: 600; color: #4a5568; background: #f7fafc; position: sticky; top: 0; }
+.bd-table tbody tr:hover { background: #f7fafc; }
+.bd-num { text-align: right; font-variant-numeric: tabular-nums; }
+.bd-delta { font-weight: 600; }
+/* Severity on the difference only — the raw balances stay neutral so the eye
+   goes to the size of the disagreement, not to big numbers. */
+.bd-gray   { color: #718096; }
+.bd-yellow { color: #b7791f; }
+.bd-red    { color: #c53030; }
+.bd-tag {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 9px;
+  background: #edf2f7; color: #718096; font-size: .72rem; vertical-align: middle;
+}
+
+/* The comparison is against a summary older than the committee's own filings,
+   so its dollar figure is not evidence of disagreement. Tinted rather than
+   grey so it reads as a caveat on the number beside it — these rows stay in
+   the list because the fix is to re-scrape them. */
+.bd-tag-stale { background: #fefcbf; color: #975a16; }
+.bd-tag-unpaired { background: #fed7d7; color: #9b2c2c; }
+.bd-reason {
+  display: block;
+  margin-top: 3px;
+  color: #718096;
+  font-size: .76rem;
+}
+
+/* A scope-level balance/count change after the pair was captured. Shown next
+   to the frozen difference as context, never folded into that difference. */
+.bd-since {
+  display: block;
+  font-size: 0.78em;
+  font-weight: 400;
+  color: #718096;
+  margin-top: 2px;
+}
+
+#em-results-b { max-height: 320px; overflow-y: auto; }
+.em-selected { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; }
+#em-results-b { position: static; margin-top: 6px; }
+#em-results-b .em-r-name { display: flex; align-items: center; gap: 8px; }
+#em-results-b input[type="checkbox"] { width: auto; margin: 0; flex: 0 0 auto; }
+
+/* How much of the decision log is on screen, above it. */
+.em-log-note {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}

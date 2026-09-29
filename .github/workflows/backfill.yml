@@ -1,0 +1,820 @@
+name: Historical Backfill (one-time)
+run-name: ${{ startsWith(inputs.end_date, 'startup:') && format('Historical Backfill startup retry {0}', inputs.end_date) || 'Historical Backfill (one-time)' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_year:
+        description: "Start year for backfill"
+        required: false
+        default: "2006"
+        type: string
+      end_year:
+        description: "End year for backfill (blank = current year)"
+        required: false
+        default: ""
+        type: string
+      end_date:
+        description: "Internal: frozen remediation end date, optionally carrying a startup-retry handoff"
+        required: false
+        default: ""
+        type: string
+      date_field:
+        description: "Date field to search by: 'filed' (default) or 'tran' (transaction date, needed for pre-2017 data)"
+        required: false
+        default: "tran"
+        type: string
+      filer_ids:
+        description: "Space-separated filer IDs, 'auto' to backfill all discrepancies, or blank for date-range mode"
+        required: false
+        default: ""
+        type: string
+      chain_index:
+        description: "Internal: which run of the retrigger chain this is"
+        required: false
+        default: "1"
+      reset_auto:
+        description: "Reset auto-backfill tracking (clears the list of already-backfilled filers)"
+        required: false
+        default: "false"
+        type: boolean
+      identity_remediation:
+        description: "Force fresh exact exports for filer IDs (bypasses count/held shortcuts)"
+        required: false
+        default: "false"
+        type: boolean
+      resume_auto:
+        description: "Internal: explicit filer IDs belong to the automatic identity-remediation chain"
+        required: false
+        default: "false"
+        type: boolean
+      resume_progress:
+        description: >
+          Continue an interrupted identity chain: keep the windows already
+          recorded for these filer IDs instead of starting them over. A chained
+          run resumes on its own; this is for restarting a chain that stopped.
+        required: false
+        default: "false"
+        type: boolean
+      verification_filer_ids:
+        description: "Internal: immutable original filer set for final identity verification"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+# Backfill belongs with the other ORESTAR scrapers, not with the aggregation
+# pipeline. It sat in data-pipeline alongside daily-refresh, and because GitHub
+# keeps only ONE pending run per lane, a long backfill chain re-claiming that
+# lane every run would cancel a queued daily refresh outright rather than delay
+# it — the way a scheduled Candidate Filings run was evicted with zero jobs
+# recorded.
+#
+# In orestar-scrape it coordinates through the await-orestar check instead: a
+# runtime question about what is actually running, which delays rather than
+# evicts, and which every ORESTAR job honours.
+concurrency:
+  # A startup-retry child must be able to start while its failed parent is
+  # finishing; the shared pending slot could otherwise evict it. The child
+  # still waits behind every older ORESTAR run in await-orestar below.
+  # Per run, not one shared lane. GitHub keeps only ONE pending run per group,
+  # so while this workflow sat in 'orestar-scrape' a replacement queued after a
+  # coordination timeout could evict another backfill waiting in the same lane.
+  # await-orestar is what actually serializes ORESTAR access.
+  group: ${{ startsWith(inputs.end_date, 'startup:') && format('orestar-scrape-retry-{0}', inputs.end_date) || format('orestar-scrape-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  elect_retry:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.elect.outputs.proceed }}
+    steps:
+      - name: Coalesce duplicate startup retries
+        id: elect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HANDOFF: ${{ inputs.end_date }}
+        run: |
+          if [[ "$HANDOFF" != startup:* ]]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # dispatch_retry.sh is intentionally at-least-once. If GitHub accepts
+          # a dispatch but loses the response, several identical children can
+          # exist. Their logical concurrency group serializes them; only the
+          # oldest run may do work or create the next retry generation.
+          EXPECTED_TITLE="Historical Backfill startup retry $HANDOFF"
+          RAW=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/backfill.yml/runs?event=workflow_dispatch&per_page=100" \
+            --jq '.workflow_runs[] | [.id, .display_title] | @tsv')
+          while IFS=$'\t' read -r RUN_ID DISPLAY_TITLE; do
+            [ -n "$RUN_ID" ] || continue
+            if [ "$DISPLAY_TITLE" = "$EXPECTED_TITLE" ] && \
+               [ "$RUN_ID" -lt "$GITHUB_RUN_ID" ]; then
+              BACKFILL_JOBS=$(gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs?per_page=100" \
+                --jq '[.jobs[] | select(.name == "backfill" and .conclusion != "skipped")] | length')
+              if [ "$BACKFILL_JOBS" -gt 0 ]; then
+                echo "Duplicate of earlier logical retry run $RUN_ID — coalescing."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "Earlier logical retry $RUN_ID never entered backfill; taking over."
+            fi
+          done <<< "$RAW"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+  backfill:
+    needs: elect_retry
+    if: needs.elect_retry.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Backfill is the heaviest ORESTAR consumer of the lot — it walks years of
+      # weekly windows — so it must take its turn like everything else. It was
+      # missed when this check was introduced, which also meant the other four
+      # never waited for IT.
+      - name: Wait for other ORESTAR jobs
+        id: orestar_wait
+        continue-on-error: true
+        uses: ./.github/actions/await-orestar
+        with:
+          fail-on-timeout: "true"
+
+      # This workflow used to fail here and take its chain with it. On
+      # 2026-09-19 run 9 of a 181-filer identity chain waited out the window,
+      # refused to overlap, and nothing replaced it: 134 committees were never
+      # reached, and the restart could not resume. Every other ORESTAR workflow
+      # queues a replacement instead, and so does this one now.
+      #
+      # Inputs pass through verbatim, chain_index included, so the replacement
+      # is the same request: a chained run keeps resuming, and a first run still
+      # starts fresh. A startup-retry child is the exception — elect_retry
+      # coalesces those by run title, so a replacement carrying the same handoff
+      # would be dropped as a duplicate rather than run.
+      - name: Requeue after coordination timeout
+        if: steps.orestar_wait.outcome == 'failure' && !startsWith(inputs.end_date, 'startup:')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/dispatch_retry.sh backfill.yml --ref "${{ github.ref_name }}" \
+            -f filer_ids="${{ inputs.filer_ids }}" \
+            -f start_year="${{ inputs.start_year }}" \
+            -f end_year="${{ inputs.end_year }}" \
+            -f end_date="${{ inputs.end_date }}" \
+            -f date_field="${{ inputs.date_field }}" \
+            -f identity_remediation="${{ inputs.identity_remediation }}" \
+            -f resume_auto="${{ inputs.resume_auto }}" \
+            -f resume_progress="${{ inputs.resume_progress }}" \
+            -f verification_filer_ids="${{ inputs.verification_filer_ids }}" \
+            -f reset_auto="${{ inputs.reset_auto }}" \
+            -f chain_index="${{ inputs.chain_index || '1' }}"
+
+      - name: Refuse uncoordinated backfill
+        if: steps.orestar_wait.outcome == 'failure'
+        run: |
+          echo "::error::ORESTAR remained busy; queued a replacement backfill instead of overlapping it."
+          exit 1
+
+      - name: Validate identity-backfill startup retry handoff
+        id: startup_handoff
+        if: startsWith(inputs.end_date, 'startup:')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HANDOFF: ${{ inputs.end_date }}
+          FILER_IDS: ${{ inputs.filer_ids }}
+          IDENTITY_MODE: ${{ inputs.identity_remediation }}
+          RESUME_AUTO: ${{ inputs.resume_auto }}
+          RESET_AUTO: ${{ inputs.reset_auto }}
+          VERIFICATION_IDS: ${{ inputs.verification_filer_ids }}
+        run: |
+          if [[ ! "$HANDOFF" =~ ^startup:[0-9]{4}-[0-9]{2}-[0-9]{2}:[12]:[0-9]+:[0-9]+:(true|false)$ ]]; then
+            echo "::error::Invalid identity-backfill startup handoff."
+            exit 1
+          fi
+          IFS=: read -r HANDOFF_KIND END_DATE RETRY_INDEX SOURCE_RUN SOURCE_ATTEMPT IDENTITY_RESUME HANDOFF_EXTRA <<< "$HANDOFF"
+          if [ "$HANDOFF_KIND" != "startup" ] || [ -n "$HANDOFF_EXTRA" ]; then
+            echo "::error::Invalid identity-backfill startup handoff."
+            exit 1
+          fi
+          if [[ ! "$END_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "::error::Invalid startup-retry end date: $END_DATE"
+            exit 1
+          fi
+          case "$RETRY_INDEX" in
+            1|2) ;;
+            *) echo "::error::Invalid startup-retry index: $RETRY_INDEX"; exit 1 ;;
+          esac
+          case "$SOURCE_RUN" in
+            ''|*[!0-9]*) echo "::error::Invalid startup-retry parent run ID."; exit 1 ;;
+          esac
+          case "$SOURCE_ATTEMPT" in
+            ''|*[!0-9]*) echo "::error::Invalid startup-retry parent attempt."; exit 1 ;;
+          esac
+          case "$IDENTITY_RESUME" in
+            true|false) ;;
+            *) echo "::error::Invalid startup-retry identity-resume state."; exit 1 ;;
+          esac
+          if [ "$IDENTITY_MODE" != "true" ] || [ "$RESUME_AUTO" != "true" ] || \
+             [ -z "$FILER_IDS" ] || [ "$FILER_IDS" = "auto" ] || \
+             [[ ! "$FILER_IDS" =~ ^[0-9]+([ ]+[0-9]+)*$ ]] || \
+             [ -z "$VERIFICATION_IDS" ] || \
+             [[ ! "$VERIFICATION_IDS" =~ ^[0-9]+([ ]+[0-9]+)*$ ]] || \
+             ( [ "$RESET_AUTO" != "true" ] && [ "$RESET_AUTO" != "false" ] ); then
+            echo "::error::Invalid functional inputs for an identity-backfill startup retry."
+            exit 1
+          fi
+
+          # Authenticate the exact source attempt, not merely the run ID. A
+          # manual rerun must not retroactively authorize a stale child, and a
+          # cancellation remains an instruction to stop the chain.
+          STATE=""
+          LATEST=""
+          for ATTEMPT in 1 2 3; do
+            STATE=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/attempts/$SOURCE_ATTEMPT" \
+              --jq '[.id, .run_attempt, .path, .event, .status, (.conclusion // "")] | @tsv' \
+              2>/dev/null || true)
+            LATEST=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" \
+              --jq '[.run_attempt, .status, (.conclusion // "")] | @tsv' \
+              2>/dev/null || true)
+            [ -n "$STATE" ] && [ -n "$LATEST" ] && break
+            sleep 5
+          done
+          if [ -z "$STATE" ] || [ -z "$LATEST" ]; then
+            echo "::error::Could not read current state for retry source run $SOURCE_RUN attempt $SOURCE_ATTEMPT."
+            exit 1
+          fi
+          IFS=$'\t' read -r ACTUAL_RUN ACTUAL_ATTEMPT SOURCE_PATH SOURCE_EVENT STATUS CONCLUSION <<< "$STATE"
+          IFS=$'\t' read -r LATEST_ATTEMPT LATEST_STATUS LATEST_CONCLUSION <<< "$LATEST"
+          if [ "$ACTUAL_RUN" != "$SOURCE_RUN" ] || \
+             [ "$ACTUAL_ATTEMPT" != "$SOURCE_ATTEMPT" ] || \
+             [ "$SOURCE_PATH" != ".github/workflows/backfill.yml" ] || \
+             [ "$SOURCE_EVENT" != "workflow_dispatch" ] || \
+             [ "$STATUS" != "completed" ] || \
+             [ "$CONCLUSION" != "failure" ] || \
+             [ "$LATEST_ATTEMPT" != "$SOURCE_ATTEMPT" ] || \
+             [ "$LATEST_STATUS" != "completed" ] || \
+             [ "$LATEST_CONCLUSION" != "failure" ]; then
+            echo "::error::Invalid retry source: path=$SOURCE_PATH event=$SOURCE_EVENT exact=$STATUS/$CONCLUSION latest=$LATEST_ATTEMPT:$LATEST_STATUS/$LATEST_CONCLUSION."
+            exit 1
+          fi
+
+          echo "end_date=$END_DATE" >> "$GITHUB_OUTPUT"
+          echo "retry_index=$RETRY_INDEX" >> "$GITHUB_OUTPUT"
+          echo "parent_run=$SOURCE_RUN" >> "$GITHUB_OUTPUT"
+          echo "parent_attempt=$SOURCE_ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "identity_resume=$IDENTITY_RESUME" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh branch after coordination wait
+        # Checkout happens before the wait because the wait action is local.
+        # Another scraper may publish ledger/data changes while this job waits;
+        # starting from the pre-wait snapshot would resurrect those old files
+        # when a stale runner republishes whole-file state.
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Hydrate pipeline state
+        run: python scripts/pipeline_state.py pull transactions summaries auxiliary
+
+      - name: Install Playwright browser + system dependencies
+        # Bounded and retried: a hung install held the ORESTAR lane for 3 hours
+        # against the job's 300-minute timeout. 18 minutes is the backstop for
+        # the script's own 3 x 300s cap.
+        timeout-minutes: 25
+        run: bash scripts/install_playwright.sh
+
+      - name: Install Xvfb (virtual display for headed browser)
+        run: sudo apt-get install -y xvfb
+
+      - name: Resolve filer IDs (auto mode)
+        id: resolve
+        run: |
+          FILER_IDS="${{ inputs.filer_ids }}"
+          IDENTITY_MODE="${{ inputs.identity_remediation }}"
+          IS_AUTO="${{ inputs.resume_auto }}"
+          IDENTITY_RESUME="${{ steps.startup_handoff.outputs.identity_resume || 'false' }}"
+          IDENTITY_END_DATE="${{ steps.startup_handoff.outputs.end_date || inputs.end_date }}"
+          VERIFICATION_IDS="${{ inputs.verification_filer_ids }}"
+          CHAIN="${{ inputs.chain_index || '1' }}"
+          STARTUP_RETRY="${{ steps.startup_handoff.outputs.retry_index || '0' }}"
+          STARTUP_PARENT="${{ steps.startup_handoff.outputs.parent_run }}"
+          AUTO_STATUS=manual
+          case "$CHAIN" in
+            ''|*[!0-9]*) echo "Invalid backfill chain index: $CHAIN"; exit 1 ;;
+          esac
+          if [ -n "$STARTUP_PARENT" ]; then
+            if [ "$IDENTITY_MODE" != "true" ] || [ "$IS_AUTO" != "true" ] || \
+               [ -z "$FILER_IDS" ] || [ "$FILER_IDS" = "auto" ] || \
+               [ -z "$VERIFICATION_IDS" ] || \
+               ( [ "${{ inputs.reset_auto }}" != "true" ] && \
+                 [ "${{ inputs.reset_auto }}" != "false" ] ); then
+              echo "Invalid functional inputs for an identity-backfill startup retry."
+              exit 1
+            fi
+          fi
+          if [ "$CHAIN" = "1" ] && [ "$STARTUP_RETRY" = "0" ]; then
+            # The first run defines the immutable verification scope. Ignore
+            # any stale/internal value supplied by a manual dispatch.
+            VERIFICATION_IDS=""
+          fi
+          if [ "${{ inputs.reset_auto }}" = "true" ]; then
+            echo "Resetting auto-backfill tracking file..."
+            rm -f data/backfilled_filers.txt
+          fi
+          if [ "$FILER_IDS" = "auto" ]; then
+            echo "Auto mode: finding filers with discrepancies..."
+            python3 scraper/auto_backfill_ids.py
+            AUTO_MODE=$(cat /tmp/auto_backfill_mode.txt 2>/dev/null || echo identity)
+            AUTO_STATUS=$(cat /tmp/auto_backfill_status.txt 2>/dev/null || echo blocked)
+            if [ "$AUTO_MODE" != "identity" ]; then
+              echo "Automatic remediation requires exact-identity mode; refusing $AUTO_MODE."
+              exit 1
+            fi
+            case "$AUTO_STATUS" in
+              selected|idle|blocked) ;;
+              *) echo "Invalid automatic-remediation status: $AUTO_STATUS"; exit 1 ;;
+            esac
+            IDENTITY_MODE=true
+            IDENTITY_RESUME=$(cat /tmp/auto_backfill_resume.txt 2>/dev/null || echo false)
+            AUTO_END_DATE=$(cat /tmp/auto_backfill_end_date.txt 2>/dev/null || true)
+            if [ -n "$AUTO_END_DATE" ]; then
+              IDENTITY_END_DATE="$AUTO_END_DATE"
+            fi
+            IS_AUTO=true
+            if [ -f /tmp/auto_backfill_ids.txt ]; then
+              FILER_IDS=$(cat /tmp/auto_backfill_ids.txt)
+            else
+              FILER_IDS=""
+            fi
+            if [ -z "$FILER_IDS" ]; then
+              if [ "$AUTO_STATUS" = "selected" ]; then
+                echo "Selector reported selected without filer IDs."
+                exit 1
+              fi
+              if [ "$AUTO_STATUS" = "blocked" ]; then
+                echo "Automatic remediation is provenance-blocked; no completion is being reported."
+              else
+                echo "No exact-identity repair is currently authorized."
+              fi
+              echo "resolved=" >> "$GITHUB_OUTPUT"
+              echo "is_auto=true" >> "$GITHUB_OUTPUT"
+              echo "auto_status=$AUTO_STATUS" >> "$GITHUB_OUTPUT"
+              echo "identity_mode=$IDENTITY_MODE" >> "$GITHUB_OUTPUT"
+              echo "identity_resume=$IDENTITY_RESUME" >> "$GITHUB_OUTPUT"
+              echo "identity_end_date=$IDENTITY_END_DATE" >> "$GITHUB_OUTPUT"
+              echo "verification_ids=$VERIFICATION_IDS" >> "$GITHUB_OUTPUT"
+              echo "chain=$CHAIN" >> "$GITHUB_OUTPUT"
+              echo "startup_retry=$STARTUP_RETRY" >> "$GITHUB_OUTPUT"
+              echo "startup_parent=$STARTUP_PARENT" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$AUTO_STATUS" != "selected" ]; then
+              echo "Selector produced filer IDs without exact authorization."
+              exit 1
+            fi
+            echo "Auto-resolved filer IDs: $FILER_IDS"
+            echo "resolved=$FILER_IDS" >> "$GITHUB_OUTPUT"
+            echo "is_auto=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "resolved=$FILER_IDS" >> "$GITHUB_OUTPUT"
+            echo "is_auto=$IS_AUTO" >> "$GITHUB_OUTPUT"
+            if [ -z "$STARTUP_PARENT" ] && [ "$IDENTITY_MODE" = "true" ] && \
+               [ "$CHAIN" -gt 1 ] 2>/dev/null; then
+              IDENTITY_RESUME=true
+            fi
+            # A chain that stopped (a timeout, a cancelled run, an exhausted
+            # runner) restarts at chain 1, which would otherwise clear the
+            # progress of every filer it had already finished and fetch them
+            # all again — 47 committees' worth on 2026-09-19.
+            if [ -z "$STARTUP_PARENT" ] && [ "$IDENTITY_MODE" = "true" ] && \
+               [ "${{ inputs.resume_progress }}" = "true" ]; then
+              IDENTITY_RESUME=true
+            fi
+          fi
+          if [ "$IS_AUTO" = "true" ] && [ "$IDENTITY_MODE" != "true" ]; then
+            echo "Automatic remediation is exact-identity only."
+            exit 1
+          fi
+          if [ -z "$VERIFICATION_IDS" ] && [ "$IDENTITY_MODE" = "true" ]; then
+            VERIFICATION_IDS="$FILER_IDS"
+          fi
+          if [ "$IDENTITY_MODE" = "true" ]; then
+            for fid in $FILER_IDS; do
+              case " $VERIFICATION_IDS " in
+                *" $fid "*) ;;
+                *) echo "Current filer $fid is absent from verification scope"; exit 1 ;;
+              esac
+            done
+          fi
+          echo "identity_mode=$IDENTITY_MODE" >> "$GITHUB_OUTPUT"
+          echo "identity_resume=$IDENTITY_RESUME" >> "$GITHUB_OUTPUT"
+          echo "identity_end_date=$IDENTITY_END_DATE" >> "$GITHUB_OUTPUT"
+          echo "verification_ids=$VERIFICATION_IDS" >> "$GITHUB_OUTPUT"
+          echo "chain=$CHAIN" >> "$GITHUB_OUTPUT"
+          echo "startup_retry=$STARTUP_RETRY" >> "$GITHUB_OUTPUT"
+          echo "startup_parent=$STARTUP_PARENT" >> "$GITHUB_OUTPUT"
+          echo "auto_status=$AUTO_STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Hold identity-backfill startup retry cooldown
+        if: steps.resolve.outputs.startup_parent != ''
+        env:
+          COOLDOWN_SECONDS: "1200"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN: ${{ steps.resolve.outputs.startup_parent }}
+          SOURCE_ATTEMPT: ${{ steps.startup_handoff.outputs.parent_attempt }}
+        run: |
+          case "$COOLDOWN_SECONDS" in
+            ''|*[!0-9]*) echo "::error::Invalid startup cooldown."; exit 1 ;;
+          esac
+          echo "::warning::Holding the ORESTAR lane quiet for ${COOLDOWN_SECONDS}s before startup retry ${{ steps.resolve.outputs.startup_retry }}/2."
+          sleep "$COOLDOWN_SECONDS"
+
+          # A maintainer can rerun or cancel the source while this child is
+          # cooling down. Recheck at the handoff boundary so that newer attempt
+          # remains authoritative instead of racing a now-stale child.
+          LATEST=""
+          for ATTEMPT in 1 2 3; do
+            LATEST=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" \
+              --jq '[.run_attempt, .status, (.conclusion // "")] | @tsv' \
+              2>/dev/null || true)
+            [ -n "$LATEST" ] && break
+            sleep 5
+          done
+          IFS=$'\t' read -r LATEST_ATTEMPT LATEST_STATUS LATEST_CONCLUSION <<< "$LATEST"
+          if [ "$LATEST_ATTEMPT" != "$SOURCE_ATTEMPT" ] || \
+             [ "$LATEST_STATUS" != "completed" ] || \
+             [ "$LATEST_CONCLUSION" != "failure" ]; then
+            echo "::error::Startup retry became stale during cooldown: latest=$LATEST_ATTEMPT:$LATEST_STATUS/$LATEST_CONCLUSION."
+            exit 1
+          fi
+
+      # Gated on "auto mode found nothing", NOT on "no filer ids given".
+      #
+      # This workflow does two different jobs: a filer-targeted backfill and a
+      # window backfill across a year range. The script below already handled
+      # both, but every step required a non-empty resolved filer list, so the
+      # window branch could never execute. Dispatching it with year inputs
+      # skipped all real work and still went green — 2016 was requested, the
+      # run reported success, and not a single row was fetched.
+      - name: Backfill ORESTAR data
+        id: fetch
+        if: (steps.resolve.outputs.resolved != '' || steps.resolve.outputs.is_auto != 'true')
+        env:
+          # Read-only use: the fetcher asks how many rows we already hold for a
+          # window so it can skip downloading one we have in full. ORESTAR
+          # reports the true count on the results page, so one search settles it
+          # — and skipping the export is what makes the request budget go far
+          # enough to matter. Without this the step simply downloads everything,
+          # as it did before.
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          FILER_IDS="${{ steps.resolve.outputs.resolved }}"
+          if [ -n "$FILER_IDS" ]; then
+            echo "Filer-targeted backfill: $FILER_IDS"
+            # This marker is persisted and otherwise describes the preceding
+            # run. Clear it for the guarded identity-auto path so no failure
+            # can mistake a prior filer's completion for this request's result.
+            # Other targeted modes may intentionally publish partial progress
+            # after fetch failure, so they must not inherit this deletion.
+            if [ "${{ steps.resolve.outputs.identity_mode }}" = "true" ] && \
+               [ "${{ steps.resolve.outputs.is_auto }}" = "true" ]; then
+              rm -f data/completed_backfills.txt
+            fi
+            ARGS="--filer-ids $FILER_IDS --start-year=${{ inputs.start_year }}"
+            if [ "${{ steps.resolve.outputs.identity_mode }}" = "true" ]; then
+              END_DATE="${{ steps.resolve.outputs.identity_end_date }}"
+              if [ -z "$END_DATE" ]; then
+                END_DATE=$(date -u +%F)
+              fi
+              ARGS="$ARGS --identity-remediation --end-date=$END_DATE"
+              echo "end_date=$END_DATE" >> "$GITHUB_OUTPUT"
+              if [ "${{ steps.resolve.outputs.identity_resume }}" != "true" ]; then
+                ARGS="$ARGS --reset-identity-progress"
+              fi
+            fi
+            set +e
+            set -o pipefail
+            xvfb-run --auto-servernum python scraper/fetch.py $ARGS 2>&1 | tee /tmp/backfill.log
+            PIPE_STATUSES=("${PIPESTATUS[@]}")
+            set -e
+            FETCH_STATUS=${PIPE_STATUSES[0]}
+            TEE_STATUS=${PIPE_STATUSES[1]:-0}
+            if [ "$FETCH_STATUS" -eq 0 ] && [ "$TEE_STATUS" -ne 0 ]; then
+              FETCH_STATUS=$TEE_STATUS
+            fi
+            RESULT=$(grep '^REMEDIATION_RESULT ' /tmp/backfill.log | tail -1 || true)
+            PROGRESS=0
+            RETRY=0
+            STARTUP_RETRYABLE=0
+            for KV in $RESULT; do
+              case "$KV" in
+                progress=*) PROGRESS=${KV#progress=} ;;
+                retry=*)    RETRY=${KV#retry=} ;;
+              esac
+            done
+            if [ "$FETCH_STATUS" -ne 0 ] && \
+               [ "${{ steps.resolve.outputs.identity_mode }}" = "true" ] && \
+               [ "${{ steps.resolve.outputs.is_auto }}" = "true" ] && \
+               grep -qx 'REMEDIATION_STARTUP_EXHAUSTED attempts=3' /tmp/backfill.log && \
+               ! grep -q 'REMEDIATION_RESULT ' /tmp/backfill.log; then
+              STARTUP_RETRYABLE=1
+            fi
+            echo "progress=$PROGRESS" >> "$GITHUB_OUTPUT"
+            echo "retry=$RETRY" >> "$GITHUB_OUTPUT"
+            echo "startup_retryable=$STARTUP_RETRYABLE" >> "$GITHUB_OUTPUT"
+            exit "$FETCH_STATUS"
+          else
+            ARGS="--mode=backfill --start-year=${{ inputs.start_year }} --date-field=${{ inputs.date_field }}"
+            if [ -n "${{ inputs.end_year }}" ]; then
+              ARGS="$ARGS --end-year=${{ inputs.end_year }}"
+            fi
+            xvfb-run --auto-servernum python scraper/fetch.py $ARGS
+            echo "progress=0" >> "$GITHUB_OUTPUT"
+            echo "retry=0" >> "$GITHUB_OUTPUT"
+            echo "startup_retryable=0" >> "$GITHUB_OUTPUT"
+            echo "end_date=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Retry transient identity-backfill startup
+        if: >-
+          always() && !cancelled() &&
+          steps.fetch.outcome == 'failure' &&
+          steps.fetch.outputs.startup_retryable == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scripts/retry_backfill_startup.sh \
+            "${{ steps.resolve.outputs.startup_retry }}" \
+            "${{ github.ref_name }}" \
+            "${{ steps.resolve.outputs.resolved }}" \
+            "${{ inputs.start_year }}" \
+            "${{ steps.fetch.outputs.end_date }}" \
+            "${{ inputs.date_field }}" \
+            "${{ steps.resolve.outputs.chain }}" \
+            "${{ steps.resolve.outputs.is_auto }}" \
+            "${{ steps.resolve.outputs.identity_resume }}" \
+            "${{ inputs.reset_auto }}" \
+            "${{ steps.resolve.outputs.verification_ids }}" \
+            "${{ github.run_id }}" \
+            "${{ github.run_attempt }}"
+
+      - name: Track successfully backfilled filers (auto mode)
+        if: "!cancelled() && steps.fetch.outcome == 'success' && steps.resolve.outputs.is_auto == 'true' && steps.resolve.outputs.resolved != ''"
+        run: |
+          # Mark done ONLY what the scraper reports it actually finished.
+          #
+          # This used to walk the REQUESTED filer list and tick off anything not
+          # named in incomplete_backfills.txt. That is wrong whenever the run
+          # stops early: fetch.py breaks out of the filer loop after two
+          # consecutive failures, and the filers it never reached appear in
+          # neither list — so they were marked backfilled without a single
+          # request being made for them. A ten-filer batch that stopped after
+          # three recorded all ten as done.
+          #
+          # It is not a hypothetical. 3,639 of the 4,128 filers on the tracking
+          # list have no downloaded file at all, and filer 4572 — marked done,
+          # nothing on disk — turned out to be 9,031 rows short of ORESTAR for
+          # 2023 alone.
+          TRACKING_FILE="data/backfilled_filers.txt"
+          COMPLETED_FILE="data/completed_backfills.txt"
+          touch "$TRACKING_FILE"
+          if [ ! -f "$COMPLETED_FILE" ]; then
+            echo "No completed_backfills.txt — the fetch step recorded nothing as finished."
+            echo "Marking nothing done; every requested filer will be retried."
+            exit 0
+          fi
+          while read -r fid; do
+            [ -z "$fid" ] && continue
+            grep -qx "$fid" "$TRACKING_FILE" || echo "$fid" >> "$TRACKING_FILE"
+            echo "  ✓ Tracked filer $fid"
+          done < "$COMPLETED_FILE"
+          requested=$(echo "${{ steps.resolve.outputs.resolved }}" | wc -w)
+          finished=$(grep -c . "$COMPLETED_FILE" || true)
+          echo "Finished $finished of $requested requested filers; the rest stay queued."
+
+      - name: Check remaining windows
+        id: remaining
+        if: (steps.resolve.outputs.resolved != '' || steps.resolve.outputs.is_auto != 'true')
+        run: |
+          FILER_IDS="${{ steps.resolve.outputs.resolved }}"
+          if [ -n "$FILER_IDS" ]; then
+            echo "remaining=filer" >> "$GITHUB_OUTPUT"
+          else
+            ARGS="--mode=count-remaining --start-year=${{ inputs.start_year }} --date-field=${{ inputs.date_field }}"
+            if [ -n "${{ inputs.end_year }}" ]; then
+              ARGS="$ARGS --end-year=${{ inputs.end_year }}"
+            fi
+            remaining=$(python scraper/fetch.py $ARGS)
+            echo "Remaining unfetched windows: $remaining"
+            echo "remaining=$remaining" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Process data
+        id: process
+        if: (steps.resolve.outputs.resolved != '' || steps.resolve.outputs.is_auto != 'true')
+        # The pooler hides a dead Postgres backend (2026-09-23), so a hang has to
+        # be ended here. The two branches below differ by two orders of
+        # magnitude: merge-only took 1.3-3.0 minutes over 34 runs; the final
+        # batch (full aggregation, up to 37 minutes elsewhere, plus a full
+        # reload not yet timed in v2, plus the re-key) gets 150. Keep this
+        # condition in step with the shell's.
+        timeout-minutes: ${{ steps.resolve.outputs.resolved == '' && steps.remaining.outputs.remaining == '0' && 150 || 20 }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: exports
+        run: |
+          FILER_IDS="${{ steps.resolve.outputs.resolved }}"
+          REMAINING="${{ steps.remaining.outputs.remaining }}"
+          if [ -n "$FILER_IDS" ]; then
+            # Filer-targeted: merge only (daily refresh will aggregate)
+            python scraper/process.py --merge-only
+          elif [ "$REMAINING" = "0" ]; then
+            # Final date-range batch: full aggregation
+            echo "Final batch — running full aggregation..."
+            python scraper/process.py
+            # After the last batch is merged, reload the full transactions
+            # table so Postgres exactly mirrors the year shards.
+            python scraper/process.py --supabase-full-load
+            # A full aggregation rebuilds the donor blobs from raw labels, so
+            # the resolver's identities and the saved merges have to be put
+            # back. The merge-only branches leave the blobs alone and need it
+            # no more than the daily refresh already gives them.
+            python scraper/refresh_donor_aggregates.py
+          else
+            # Intermediate date-range batch: merge only
+            echo "Intermediate batch ($REMAINING windows remaining) — merge only..."
+            python scraper/process.py --merge-only
+          fi
+
+      - name: Publish backfill state
+        if: "${{ !cancelled() && steps.process.outcome == 'success' }}"
+        run: python scripts/pipeline_state.py push transactions auxiliary
+
+      # success(), not !cancelled(): cancelling a run used to fire this step
+      # anyway, so stopping a runaway chain meant disabling the workflow.
+      - name: Re-trigger if backfill incomplete
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IS_AUTO="${{ steps.resolve.outputs.is_auto }}"
+          FILER_IDS="${{ steps.resolve.outputs.resolved }}"
+          IDENTITY_MODE="${{ steps.resolve.outputs.identity_mode }}"
+          AUTO_STATUS="${{ steps.resolve.outputs.auto_status }}"
+
+          if [ "$IS_AUTO" = "true" ] && [ -z "$FILER_IDS" ]; then
+            if [ "$AUTO_STATUS" = "blocked" ]; then
+              echo "Automatic remediation remains provenance-blocked; no completion is being reported."
+            else
+              echo "No exact-identity repair is currently authorized; stopping without a completion claim."
+            fi
+            exit 0
+          fi
+
+          # Every targeted mode first proves which requested filers actually
+          # drained their fetch queues. Identity remediation additionally uses
+          # freshly-validated window progress, so a large filer can advance
+          # across runners even when no whole filer finishes in one run.
+          if [ -n "$FILER_IDS" ]; then
+            COMPLETED_FILE="data/completed_backfills.txt"
+            REMAIN=""
+            for fid in $FILER_IDS; do
+              if [ -f "$COMPLETED_FILE" ] && grep -qx "$fid" "$COMPLETED_FILE"; then
+                continue
+              fi
+              REMAIN="$REMAIN $fid"
+            done
+            REMAIN=$(echo "$REMAIN" | xargs || true)
+
+            if [ "$IDENTITY_MODE" = "true" ]; then
+              if [ -z "$REMAIN" ]; then
+                echo "Fresh exports complete; dispatching an exact identity verification."
+                bash scripts/dispatch_retry.sh coverage-diff.yml --ref "${{ github.ref_name }}" \
+                  -f filer_ids="${{ steps.resolve.outputs.verification_ids }}" \
+                  -f start_year="${{ inputs.start_year }}" \
+                  -f end_date="${{ steps.fetch.outputs.end_date }}" \
+                  -f recheck=true \
+                  -f require_no_missing=true \
+                  -f resume_auto_backfill="$IS_AUTO"
+                exit 0
+              fi
+              CHAIN="${{ steps.resolve.outputs.chain }}"
+              if [ "$CHAIN" -ge 40 ] 2>/dev/null; then
+                echo "Identity-remediation chain limit reached ($CHAIN): $REMAIN"
+                exit 0
+              fi
+              if [ "${{ steps.fetch.outputs.progress }}" = "0" ] && \
+                 [ "${{ steps.fetch.outputs.retry }}" != "1" ]; then
+                echo "This forced run validated no new windows — stopping the chain."
+                echo "Still unfinished: $REMAIN"
+                exit 0
+              fi
+              NEXT=$((CHAIN + 1))
+              echo "Chaining forced run $NEXT for: $REMAIN"
+              bash scripts/dispatch_retry.sh backfill.yml --ref "${{ github.ref_name }}" \
+                -f filer_ids="$REMAIN" \
+                -f start_year="${{ inputs.start_year }}" \
+                -f date_field="${{ inputs.date_field }}" \
+                -f identity_remediation=true \
+                -f resume_auto="$IS_AUTO" \
+                -f end_date="${{ steps.fetch.outputs.end_date }}" \
+                -f verification_filer_ids="${{ steps.resolve.outputs.verification_ids }}" \
+                -f chain_index="$NEXT"
+              exit 0
+            fi
+
+            if [ -z "$REMAIN" ]; then
+              echo "Filer-targeted backfill complete — every requested filer finished."
+              exit 0
+            fi
+
+            CHAIN="${{ steps.resolve.outputs.chain }}"
+            if [ "$CHAIN" -ge 40 ] 2>/dev/null; then
+              echo "Chain limit reached ($CHAIN) with these still unfinished: $REMAIN"
+              exit 0
+            fi
+            FINISHED=$(echo "$FILER_IDS" | wc -w)
+            LEFT=$(echo "$REMAIN" | wc -w)
+            if [ "$FINISHED" = "$LEFT" ]; then
+              echo "This run finished no filers — stopping rather than queueing an identical run."
+              echo "Still unfinished: $REMAIN"
+              exit 0
+            fi
+            NEXT=$((CHAIN + 1))
+            echo "Chaining run $NEXT for $LEFT unfinished filer(s): $REMAIN"
+            bash scripts/dispatch_retry.sh backfill.yml --ref "${{ github.ref_name }}" \
+              -f filer_ids="$REMAIN" \
+              -f start_year="${{ inputs.start_year }}" \
+              -f date_field="${{ inputs.date_field }}" \
+              -f chain_index="$NEXT"
+            exit 0
+          fi
+
+          # Defensive fallback for auto mode if it ever resolves no list above.
+          if [ "$IS_AUTO" = "true" ]; then
+            echo "Re-triggering auto backfill for next batch..."
+            bash scripts/dispatch_retry.sh backfill.yml --ref "${{ github.ref_name }}" \
+              -f filer_ids=auto
+            exit 0
+          fi
+
+          # Date-range mode: re-trigger if windows remain
+          REMAINING="${{ steps.remaining.outputs.remaining }}"
+          if [ "$REMAINING" -gt 0 ] 2>/dev/null; then
+            echo "Re-triggering backfill workflow..."
+            RETRIGGER_ARGS="-f start_year=${{ inputs.start_year }} -f date_field=${{ inputs.date_field }}"
+            if [ -n "${{ inputs.end_year }}" ]; then
+              RETRIGGER_ARGS="$RETRIGGER_ARGS -f end_year=${{ inputs.end_year }}"
+            fi
+            # Bounded, like the balances chain. An unbounded chain re-claims its
+            # concurrency lane every run, and GitHub keeps only ONE pending run per
+            # lane — so anything queued behind it is cancelled outright rather than
+            # delayed. Yielding costs nothing: every window fetched is published, so
+            # the next scheduled or manual run picks up exactly where this stopped.
+            BATCH="${{ steps.resolve.outputs.chain }}"
+            # 40, not 8. The bound is a runaway-loop backstop, not lane
+            # rationing — that was the data-pipeline concern and no longer
+            # applies. At ~25 fetches per run before ORESTAR throttles, the
+            # 2006-2016 remediation is ~26 runs, so 8 stalled it a third of the
+            # way through with nothing scheduled to resume: this workflow is
+            # dispatch-only, so "yielding" meant abandoning.
+            if [ "$BATCH" -ge "${MAX_CHAIN:-40}" ]; then
+              echo "Reached ${MAX_CHAIN:-40} chained runs; stopping."
+              echo "$REMAINING windows remain — re-run to continue."
+              exit 0
+            fi
+            RETRIGGER_ARGS="$RETRIGGER_ARGS -f chain_index=$((BATCH + 1))"
+            bash scripts/dispatch_retry.sh backfill.yml --ref "${{ github.ref_name }}" $RETRIGGER_ARGS
+          else
+            echo "Backfill complete — all windows fetched."
+          fi

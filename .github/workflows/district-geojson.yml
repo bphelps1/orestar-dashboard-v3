@@ -1,0 +1,38 @@
+name: Build District GeoJSON (one-off)
+
+# Downloads Census TIGER/Line 2024 boundaries for Oregon's legislative
+# districts, simplifies them to web weight, and commits the two GeoJSON
+# assets the race map renders. Manual dispatch only — district lines change
+# once a decade (redistricting), so re-run only after new TIGER releases.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install geometry dependencies
+        run: pip install pyshp shapely
+
+      - name: Build simplified district GeoJSON
+        run: python scraper/build_district_geojson.py
+
+      - name: Commit assets
+        run: |
+          bash scripts/push_data.sh "chore: build Oregon legislative district GeoJSON (TIGER 2024)" docs/assets/or_house.geojson docs/assets/or_senate.geojson

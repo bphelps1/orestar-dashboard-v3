@@ -1,0 +1,49 @@
+# Raw Excel downloads — never committed (except filer-targeted files
+# which are kept across runs so incomplete downloads can resume)
+data/_raw/*
+
+# Verification scratch data (per-filer ORESTAR downloads + diff reports)
+data/_verify/
+
+# Legacy single-file transactions store (replaced by data/transactions/txn_YYYY.csv.gz)
+data/transactions.csv.gz
+data/transactions.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Build artifact for the Supabase Storage full-dataset export, not a source
+# file. process.py --supabase-full-load concatenates every year shard into it
+# and uploads it; nothing reads it from the repo.
+#
+# It must never be committed: at 148.89 MB it exceeds GitHub's hard 100 MB
+# limit, and because push_data.sh stages all of data/, one run built it and the
+# push was rejected — failing the FINAL batch of a completed remediation, after
+# the data had already been fetched and synced.
+data/transactions_full.csv.gz
+
+# The browser reads aggregates from Supabase. Keep the canonical generated
+# copies under data/aggregated/, but never republish them inside the Vercel
+# output directory: that legacy mirror made each deployment about 240 MB.
+/docs/data/aggregated/
+
+# Durable scraper state lives in Supabase Storage. A clean checkout hydrates
+# only the profiles each workflow needs; generated state must never re-enter
+# Git history.
+/data/*
+!/data/README.md
+/.pipeline-state-base.json
+/.pipeline-state-base.json.*.tmp
+/.pipeline-state-quarantine/

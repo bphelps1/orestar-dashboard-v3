@@ -1,0 +1,175 @@
+{
+ "_source": "Historic_Speaker_and_President.xlsx (user-supplied), matched to ORESTAR committees",
+ "_note": "2012 had co-Speakers (Roblan & Hanna) \u2014 the source lists both, split on ';'.",
+ "leaders": [
+  {
+   "cycle": 2024,
+   "position": "Senate President",
+   "candidate": "Rob Wagner",
+   "slug": "friends_of_rob_wagner",
+   "committee": "Friends of Rob Wagner",
+   "match": "fuzzy"
+  },
+  {
+   "cycle": 2024,
+   "position": "Speaker of the House",
+   "candidate": "Julie Fahey",
+   "slug": "friends_of_julie_fahey",
+   "committee": "Friends of Julie Fahey",
+   "match": "fuzzy"
+  },
+  {
+   "cycle": 2022,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2022,
+   "position": "Speaker of the House",
+   "candidate": "Dan Rayfield",
+   "slug": "friends_of_dan_rayfield",
+   "committee": "Friends of Dan Rayfield",
+   "match": "fuzzy"
+  },
+  {
+   "cycle": 2020,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2020,
+   "position": "Speaker of the House",
+   "candidate": "Tina Kotek",
+   "slug": "friends_of_tina_kotek",
+   "committee": "Friends of Tina Kotek",
+   "match": "exact"
+  },
+  {
+   "cycle": 2018,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2018,
+   "position": "Speaker of the House",
+   "candidate": "Tina Kotek",
+   "slug": "friends_of_tina_kotek",
+   "committee": "Friends of Tina Kotek",
+   "match": "exact"
+  },
+  {
+   "cycle": 2016,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2016,
+   "position": "Speaker of the House",
+   "candidate": "Tina Kotek",
+   "slug": "friends_of_tina_kotek",
+   "committee": "Friends of Tina Kotek",
+   "match": "exact"
+  },
+  {
+   "cycle": 2014,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2014,
+   "position": "Speaker of the House",
+   "candidate": "Tina Kotek",
+   "slug": "friends_of_tina_kotek",
+   "committee": "Friends of Tina Kotek",
+   "match": "exact"
+  },
+  {
+   "cycle": 2012,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2012,
+   "position": "Speaker of the House",
+   "candidate": "Arnie Roblan",
+   "slug": "friends_of_arnie_roblan",
+   "committee": "Friends of Arnie Roblan",
+   "match": "exact"
+  },
+  {
+   "cycle": 2012,
+   "position": "Speaker of the House",
+   "candidate": "Bruce Hanna",
+   "slug": "friends_of_bruce_hanna",
+   "committee": "Friends of Bruce Hanna",
+   "match": "exact"
+  },
+  {
+   "cycle": 2010,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2010,
+   "position": "Speaker of the House",
+   "candidate": "Dave Hunt",
+   "slug": "friends_of_dave_hunt",
+   "committee": "Friends of Dave Hunt",
+   "match": "exact"
+  },
+  {
+   "cycle": 2008,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2008,
+   "position": "Speaker of the House",
+   "candidate": "Jeff Merkley",
+   "slug": "merkley_jeff_friends_of",
+   "committee": "Merkley, Jeff, Friends of",
+   "match": "corrected",
+   "note": "source spelled this \"Merkeley\""
+  },
+  {
+   "cycle": 2006,
+   "position": "Senate President",
+   "candidate": "Peter Courtney",
+   "slug": "peter_courtney_for_state_senate",
+   "committee": "Peter Courtney for State Senate",
+   "match": "exact"
+  },
+  {
+   "cycle": 2006,
+   "position": "Speaker of the House",
+   "candidate": "Karen Minnis",
+   "slug": "minnis_karen_friends_of",
+   "committee": "Minnis, Karen, Friends of",
+   "match": "exact"
+  }
+ ]
+}

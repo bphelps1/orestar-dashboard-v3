@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "description": "Scheduling hints from reviewed complete legacy collections. Never identity evidence; every new collection must query its complete range under the hard search ceiling.",
+  "filers": {
+    "191": {
+      "filer_transaction_digest": "sha256:c6efd9c34f49c7a1f52b0e5c2974ed7236b67b2535f37a9008ef5903ee1a964b",
+      "range_start": "2006-01-01",
+      "range_end": "2026-09-14",
+      "checked_at": "2026-09-14T03:26:41.471426Z",
+      "orestar": 58484,
+      "exact_search_count": 24,
+      "source_run_id": 34801912679,
+      "basis": "Successful first pass: one full-history root, 17 date children, and six deeper children for 2023-02-13. Pinned to the latest usable observation; later failed recheck supplied no replacement proof."
+    },
+    "5667": {
+      "filer_transaction_digest": "sha256:513ba2bf8b9c6b16c08b556a406003c9ae7f27a11ac12e6514257325107ec45b",
+      "range_start": "2006-01-01",
+      "range_end": "2026-09-14",
+      "checked_at": "2026-09-14T03:27:28.580990Z",
+      "orestar": 6279,
+      "exact_search_count": 3,
+      "source_run_id": 34801912679,
+      "basis": "Root plus two complete date leaves, independently verified in the successful first pass."
+    }
+  }
+}

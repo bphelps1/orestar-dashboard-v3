@@ -1,0 +1,204 @@
+name: Await ORESTAR
+description: >
+  Wait until no earlier ORESTAR scraper or balance projection writer is active
+  or freshly queued, pending, requested, or waiting, protecting both site access
+  and the shared evidence projection.
+
+# Why this exists, and why it is not a concurrency group.
+#
+# Every ORESTAR scraper and balance projection writer is listed below.
+# They cannot share one concurrency group,
+# because GitHub keeps only ONE pending run per group and cancels any earlier
+# one — so a self-retriggering chain silently evicted a scheduled job twice,
+# with zero jobs recorded and a status indistinguishable from a manual cancel.
+# Splitting the group stopped the eviction but allowed the overlap back.
+#
+# Nor is a timetable enough. Scheduled runs start a median of 71-105 minutes
+# after their cron and sometimes nearly three hours after, so a two-hour gap
+# between crons is not a two-hour gap in practice. And two of the three
+# collisions we actually saw were not schedule-driven at all: they came from
+# something dispatching a run by hand while another was live.
+#
+# Asking the API what is running right now is the only check that survives all
+# three causes, because it does not assume anything about timing.
+#
+# Deadlock is avoided by a total ordering: a run waits for an earlier start
+# timestamp, with the numeric run ID breaking same-second ties. The older run
+# always wins even though GitHub timestamps have only one-second resolution.
+
+inputs:
+  max-wait-minutes:
+    description: >
+      How long to wait before giving up and proceeding anyway. Proceeding beats
+      skipping: a skipped daily refresh means a day with no data, and the
+      scrapers' own failure guards will catch a genuinely bad overlap.
+
+      A cooled identity-backfill or account-summary retry is the exception: its
+      display title is recognized below and never overlapped, because overlap
+      would invalidate the quiet interval and immediately recreate the F5
+      failure being healed.
+
+      MUST be comfortably below the calling job's own timeout-minutes, with
+      room left for the work itself. Waiting consumes the job's budget like any
+      other step, so a wait longer than the budget kills the job before it does
+      anything — candidate-filings, with a 40-minute timeout, was cancelled at
+      exactly 40 minutes waiting on this default. Being killed while queueing
+      is a worse outcome than the overlap this avoids, since an overlapping run
+      at least finishes.
+    required: false
+    default: "45"
+  poll-seconds:
+    description: Seconds between checks.
+    required: false
+    default: "60"
+  fail-on-timeout:
+    description: >
+      Exit non-zero instead of overlapping an older scraper when the wait
+      deadline is reached or coordination state cannot be established.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for other ORESTAR jobs
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MAX_WAIT: ${{ inputs.max-wait-minutes }}
+        POLL: ${{ inputs.poll-seconds }}
+        FAIL_ON_TIMEOUT: ${{ inputs.fail-on-timeout }}
+      run: |
+        set -o pipefail
+        # ORESTAR scrapers and the aggregate-only balance writer share one lane.
+        # Projection must not overwrite caches while a scraper captures its source.
+        PEERS='.github/workflows/daily-refresh.yml
+        .github/workflows/refresh-balances.yml
+        .github/workflows/earliest-balances.yml
+        .github/workflows/filer-metadata.yml
+        .github/workflows/candidate-filings.yml
+        .github/workflows/backfill.yml
+        .github/workflows/coverage-diff.yml
+        .github/workflows/coverage-survey.yml
+        .github/workflows/atomic-balance-evidence.yml
+        .github/workflows/verify-filers.yml
+        .github/workflows/amendment-chains.yml
+        .github/workflows/misc-reread.yml
+        .github/workflows/committee-contacts.yml'
+
+        ME_STARTED=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                       -q .run_started_at 2>/dev/null || echo "")
+        if [ -z "$ME_STARTED" ]; then
+          if [ "$FAIL_ON_TIMEOUT" = "true" ]; then
+            echo "::error::Could not read this run's start time; refusing an uncoordinated state writer."
+            exit 1
+          fi
+          echo "::warning::Could not read this run's start time — proceeding without waiting."
+          exit 0
+        fi
+        echo "This run ($GITHUB_RUN_ID) started $ME_STARTED"
+
+        DEADLINE=$(( $(date +%s) + MAX_WAIT * 60 ))
+        # GitHub still reports one abandoned March backfill as queued with no
+        # jobs. A real queued contender can wait behind this repo's longest
+        # five-hour job, but a day-old record cannot still be part of the live
+        # handoff. Ignore only those demonstrably stale queue records.
+        PREACTIVE_FRESH_AFTER=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ')
+        SAW_COOLDOWN_RETRY=false
+        while :; do
+          # Ask separately for pre-active and active runs. A retry child has its
+          # own concurrency group so it can start before its failed parent
+          # exits; without queued/pending/waiting contenders in this barrier,
+          # an older scraper can become active during the child's quiet cooldown.
+          #
+          # Only runs ordered before this one count. GitHub's run_started_at is
+          # second-granularity, so timestamp comparison alone lets two runs in
+          # the same second both proceed. Numeric run ID is the deterministic
+          # tie-breaker (the lower ID was created first).
+          API_OK=true
+          ACTIVE=""
+          PREACTIVE=""
+          # Query the earlier lifecycle state first. If a run advances from
+          # pending to active between snapshots, the second query still sees it.
+          # The created-since bound excludes GitHub's months-old queued zombie;
+          # pagination prevents a fresh waiter being crowded off the first page
+          # by a busy day of completed chain runs.
+          if ! PREACTIVE=$(gh api --paginate --method GET \
+                  "repos/$GITHUB_REPOSITORY/actions/runs" \
+                  -f per_page=100 -f "created=>=$PREACTIVE_FRESH_AFTER" \
+                  --jq '.workflow_runs[] | select(.status == "queued" or .status == "pending" or .status == "requested" or .status == "waiting") | [.id, .path, (.run_started_at // .created_at), .name, (.display_title // .name), .status, (.updated_at // .created_at)] | @tsv' 2>/dev/null); then
+            API_OK=false
+          fi
+          if ! ACTIVE=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?status=in_progress&per_page=100" \
+                  --jq '.workflow_runs[] | [.id, .path, (.run_started_at // .created_at), .name, (.display_title // .name), .status, (.updated_at // .created_at)] | @tsv' 2>/dev/null); then
+            API_OK=false
+          fi
+          if [ "$API_OK" != "true" ]; then
+            # An API hiccup must not be read as "the coast is clear" — that is
+            # the mistake that dispatched a job into a running one already.
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              if [ "$FAIL_ON_TIMEOUT" = "true" ] || [ "$SAW_COOLDOWN_RETRY" = "true" ]; then
+                echo "::error::Could not establish exclusive access before the coordination deadline."
+                exit 1
+              fi
+              echo "::warning::Coordination API remained unavailable through the wait deadline — proceeding."
+              exit 0
+            fi
+            echo "::warning::Could not query in-flight runs; treating as busy and retrying."
+            sleep "$POLL"; continue
+          fi
+
+          RAW="$PREACTIVE"
+          if [ -n "$ACTIVE" ]; then
+            [ -n "$RAW" ] && RAW+=$'\n'
+            RAW+="$ACTIVE"
+          fi
+          BUSY=""
+          CURRENT_COOLDOWN_RETRY=false
+          while IFS=$'\t' read -r id path started name display_title state updated; do
+            [ -n "$id" ] || continue
+            [ "$id" = "$GITHUB_RUN_ID" ] && continue
+            echo "$PEERS" | tr -d ' ' | grep -qx "$path" || continue
+            if [ "$state" != "in_progress" ] && [ -n "$updated" ] && \
+               [[ "$updated" < "$PREACTIVE_FRESH_AFTER" ]]; then
+              echo "::warning::Ignoring stale pre-active ORESTAR run $id (state $state, last updated $updated)."
+              continue
+            fi
+            if [[ "$started" < "$ME_STARTED" ]]; then
+              :
+            elif [[ "$started" = "$ME_STARTED" ]] && \
+                 [ "$id" -lt "$GITHUB_RUN_ID" ]; then
+              :
+            else
+              continue
+            fi
+            case "$display_title" in
+              "Historical Backfill startup retry "*|"Account Summary F5 retry "*)
+                # Cooled retry children may legitimately outlast a peer's
+                # ordinary fail-open deadline. Overlapping one would destroy
+                # the quiet interval it exists to provide, so remember it even
+                # across a later coordination-API hiccup.
+                CURRENT_COOLDOWN_RETRY=true
+                ;;
+            esac
+            BUSY="$BUSY$name"$'\n'
+          done <<< "$RAW"
+          # A failed API poll must remember the last proved cooldown retry, but
+          # a successful snapshot is authoritative and may clear that state.
+          SAW_COOLDOWN_RETRY=$CURRENT_COOLDOWN_RETRY
+
+          if [ -z "$BUSY" ]; then
+            echo "No older ORESTAR run active or freshly queued — proceeding."
+            exit 0
+          fi
+          if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+            if [ "$FAIL_ON_TIMEOUT" = "true" ] || [ "$SAW_COOLDOWN_RETRY" = "true" ]; then
+              echo "::error::Older ORESTAR run still active after ${MAX_WAIT}m; refusing to overlap a state writer."
+              exit 1
+            fi
+            echo "::warning::Still waiting on [$(echo "$BUSY" | tr '\n' ' ')] after ${MAX_WAIT}m — proceeding anyway."
+            exit 0
+          fi
+          echo "Waiting on: $(echo "$BUSY" | tr '\n' ' ')"
+          sleep "$POLL"
+        done

@@ -1,0 +1,643 @@
+name: Build Atomic Balance Evidence
+run-name: 'Atomic balance evidence: ${{ inputs.effort_id }}'
+
+# Establish the first exact-ID observation that is safe to use with a paired
+# ORESTAR balance.  Summary capture and coverage diff intentionally share one
+# checkout and one hydrated transaction snapshot.  There is no second pull
+# between them: if the snapshot cannot stay fixed, the batch refuses to publish
+# a claim rather than silently comparing two different points in time.
+
+on:
+  workflow_dispatch:
+    inputs:
+      effort_id:
+        description: "Approved effort ID from .github/atomic-evidence-policy.json"
+        required: true
+        type: string
+      filer_ids:
+        description: "Space-separated physical filer IDs, or blank for actionable unanchored scopes"
+        required: false
+        default: ""
+        type: string
+      recovery_mode:
+        description: "Collect paired evidence, or backfill one verified complete scope"
+        required: false
+        default: "evidence"
+        type: choice
+        options:
+          - "evidence"
+          - "identity_backfill"
+      max_passes:
+        description: "Total capture/exact passes: 1 requires an explicit policy-authorized scope"
+        required: false
+        default: "3"
+        type: choice
+        options:
+          - "3"
+          - "1"
+      max_scopes:
+        description: "Maximum complete canonical scopes in this batch"
+        required: false
+        default: "12"
+        type: string
+      chain_index:
+        description: "Internal: which bounded batch of this evidence chain is running"
+        required: false
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  # Keep every request. A shared fixed key retains only one pending run and
+  # can silently evict an older handoff; await-orestar provides serialization.
+  group: atomic-balance-evidence-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    # Coordination/setup plus at most three real summary/exact passes. Each
+    # exact collector has a 70-minute soft budget; six hours is the hard cap.
+    timeout-minutes: 360
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+      PLAN_PATH: /tmp/atomic-balance-plan.json
+      READY_PATH: /tmp/atomic-balance-ready.json
+      REPORT_PATH: /tmp/atomic-balance-report.json
+      IDENTITY_PLAN_PATH: /tmp/identity-recovery-plan.json
+      IDENTITY_VERIFY_START_PATH: /tmp/identity-verification-start.json
+      IDENTITY_REPORT_PATH: /tmp/identity-recovery-report.json
+      PROJECTION_INPUTS_PATH: /tmp/identity-projection-inputs.json
+      TZ: UTC
+      ORESTAR_SEARCH_BUDGET_PATH: /tmp/atomic-search-budget.json
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Wait for other ORESTAR jobs
+        uses: ./.github/actions/await-orestar
+        with:
+          fail-on-timeout: "true"
+
+      - name: Refresh branch after coordination wait
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Admit this attempt against the persistent effort limit
+        id: effort
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EFFORT_ID: ${{ inputs.effort_id }}
+          MAX_PASSES: ${{ inputs.max_passes || '3' }}
+          REQUESTED_FILER_IDS: ${{ inputs.filer_ids }}
+          RECOVERY_MODE: ${{ inputs.recovery_mode || 'evidence' }}
+          REQUESTED_MAX_SCOPES: ${{ inputs.max_scopes }}
+        run: |
+          case "${RECOVERY_MODE:-evidence}" in
+            evidence) ;;
+            identity_backfill)
+              if [ "$MAX_PASSES" != '3' ] || [ "$REQUESTED_MAX_SCOPES" != '1' ] || [ -z "$REQUESTED_FILER_IDS" ]; then
+                echo "::error::Identity recovery requires explicit full-scope IDs, max_scopes=1, and max_passes=3 admission."
+                exit 1
+              fi ;;
+            *) echo "::error::Unknown recovery mode."; exit 1 ;;
+          esac
+          case "$REQUESTED_FILER_IDS" in
+            *$'\n'*|*$'\r'*) echo "::error::Filer IDs must be one space-separated line."; exit 1 ;;
+          esac
+          read -r -a REQUESTED <<< "$REQUESTED_FILER_IDS"
+          for ID in "${REQUESTED[@]}"; do
+            if [[ ! "$ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::Filer IDs must be positive numeric strings."
+              exit 1
+            fi
+          done
+          python scripts/atomic_evidence_effort.py admit --effort-id "$EFFORT_ID" \
+            --max-passes "$MAX_PASSES" --filer-ids "${REQUESTED[@]}"
+
+      - name: Initialize shared exact search budget
+        run: |
+          python scraper/search_budget.py init \
+            --path "$ORESTAR_SEARCH_BUDGET_PATH" \
+            --limit "${{ steps.effort.outputs.max_searches }}"
+
+      - name: Hydrate one immutable evidence window
+        id: state
+        run: python scripts/pipeline_state.py pull transactions summaries auxiliary
+
+      - name: Plan complete canonical scopes
+        id: plan
+        if: inputs.recovery_mode != 'identity_backfill'
+        env:
+          REQUESTED_FILER_IDS: ${{ inputs.filer_ids }}
+          MAX_SCOPES: ${{ inputs.max_scopes }}
+          POLICY_MAX_SCOPES: ${{ steps.effort.outputs.max_scopes }}
+          MAX_SEARCHES: ${{ steps.effort.outputs.max_searches }}
+          EXCLUDED_FILER_IDS: ${{ steps.effort.outputs.excluded_filer_ids }}
+          MAX_PASSES: ${{ steps.effort.outputs.max_passes }}
+          SINGLE_PASS_FILER_IDS: ${{ steps.effort.outputs.single_pass_filer_ids }}
+        run: |
+          case "$MAX_SCOPES" in
+            ''|*[!0-9]*) echo "::error::Invalid scope limit."; exit 1 ;;
+          esac
+          if [ "$MAX_SCOPES" -gt "$POLICY_MAX_SCOPES" ]; then
+            MAX_SCOPES="$POLICY_MAX_SCOPES"
+          fi
+          read -r -a EXCLUDED <<< "$EXCLUDED_FILER_IDS"
+          read -r -a SINGLE_PASS <<< "$SINGLE_PASS_FILER_IDS"
+          ARGS=(plan --max-scopes "$MAX_SCOPES" --max-searches "$MAX_SEARCHES"
+            --max-passes "$MAX_PASSES" --single-pass-filer-ids "${SINGLE_PASS[@]}"
+            --search-cost-hints .github/atomic-search-costs.json
+            --exclude-filer-ids "${EXCLUDED[@]}" --output "$PLAN_PATH")
+          if [ -n "$REQUESTED_FILER_IDS" ]; then
+            read -r -a REQUESTED <<< "$REQUESTED_FILER_IDS"
+            ARGS+=(--filer-ids "${REQUESTED[@]}")
+          fi
+          python scraper/atomic_balance_evidence.py "${ARGS[@]}"
+          FILER_IDS=$(jq -r '[.scopes[].filer_ids[]] | unique | join(" ")' "$PLAN_PATH")
+          echo "filer_ids=$FILER_IDS" >> "$GITHUB_OUTPUT"
+          echo "selected_scopes=$(jq -r '.selected_scope_count' "$PLAN_PATH")" >> "$GITHUB_OUTPUT"
+          echo "remaining_scopes=$(jq -r '.remaining_scope_count' "$PLAN_PATH")" >> "$GITHUB_OUTPUT"
+          echo "snapshot_id=$(jq -r '.transaction_snapshot_id' "$PLAN_PATH")" >> "$GITHUB_OUTPUT"
+
+      # Both modes use the admission and initialized budget above. This mode
+      # never starts a child workflow or resets the shared budget after fetch.
+      - name: Plan one currently certified missing-ID scope
+        id: identity_plan
+        if: inputs.recovery_mode == 'identity_backfill'
+        env:
+          REQUESTED_FILER_IDS: ${{ inputs.filer_ids }}
+        run: |
+          read -r -a IDS <<< "$REQUESTED_FILER_IDS"
+          python scraper/bounded_identity_recovery.py plan \
+            --filer-ids "${IDS[@]}" --output "$IDENTITY_PLAN_PATH"
+          echo "filer_ids=$(jq -r '.filer_ids | join(" ")' "$IDENTITY_PLAN_PATH")" >> "$GITHUB_OUTPUT"
+          echo "end_date=$(jq -r '.range_end' "$IDENTITY_PLAN_PATH")" >> "$GITHUB_OUTPUT"
+
+      - name: Install Playwright browser + system dependencies
+        if: steps.plan.outputs.filer_ids != '' || steps.identity_plan.outputs.filer_ids != ''
+        timeout-minutes: 25
+        run: bash scripts/install_playwright.sh
+
+      - name: Install Xvfb (virtual display for headed browser)
+        if: steps.plan.outputs.filer_ids != '' || steps.identity_plan.outputs.filer_ids != ''
+        run: sudo apt-get install -y xvfb
+
+      - name: Fetch fresh exports for every original scope member
+        id: identity_fetch
+        if: inputs.recovery_mode == 'identity_backfill' && steps.identity_plan.outcome == 'success'
+        env:
+          FILER_IDS: ${{ steps.identity_plan.outputs.filer_ids }}
+          END_DATE: ${{ steps.identity_plan.outputs.end_date }}
+        run: |
+          read -r -a IDS <<< "$FILER_IDS"
+          rm -f data/completed_backfills.txt
+          xvfb-run --auto-servernum python scraper/fetch.py \
+            --filer-ids "${IDS[@]}" --identity-remediation --reset-identity-progress \
+            --start-year 2006 --end-date "$END_DATE"
+
+      - name: Refuse incomplete or mismatched scope exports
+        id: identity_fetched
+        if: inputs.recovery_mode == 'identity_backfill' && steps.identity_fetch.outcome == 'success'
+        run: python scraper/bounded_identity_recovery.py fetched --plan "$IDENTITY_PLAN_PATH"
+
+      # Every step that runs process.py or the donor re-key has its own timeout.
+      # The Supavisor pooler keeps the client socket open when its backend dies,
+      # so a Postgres crash (2026-09-23) leaves these waiting silently instead of
+      # failing; one sat 2h10m. See supabase_sync._connect.
+      #
+      # The existing merger writes Postgres. Publish its raw facts immediately;
+      # a later exact failure is an incomplete recovery and cannot undo them.
+      - name: Merge only verified complete scope exports
+        id: identity_merge
+        if: inputs.recovery_mode == 'identity_backfill' && steps.identity_fetched.outcome == 'success'
+        # Not yet seen here; other --merge-only steps take 1.5-3 minutes.
+        timeout-minutes: 30
+        run: python scraper/process.py --merge-only
+
+      - name: Publish recovered transaction facts before verification
+        id: identity_raw_publish
+        if: inputs.recovery_mode == 'identity_backfill' && steps.identity_merge.outcome == 'success'
+        run: python scripts/pipeline_state.py push transactions auxiliary
+
+      - name: Freeze the durable post-merge verification snapshot
+        id: identity_start
+        if: inputs.recovery_mode == 'identity_backfill' && steps.identity_raw_publish.outcome == 'success'
+        run: |
+          python scraper/bounded_identity_recovery.py verification-start \
+            --plan "$IDENTITY_PLAN_PATH" --output "$IDENTITY_VERIFY_START_PATH"
+
+      - name: Verify every original member over the frozen full range
+        id: identity_diff
+        if: inputs.recovery_mode == 'identity_backfill' && steps.identity_start.outcome == 'success'
+        continue-on-error: true
+        env:
+          FILER_IDS: ${{ steps.identity_plan.outputs.filer_ids }}
+          END_DATE: ${{ steps.identity_plan.outputs.end_date }}
+        run: |
+          read -r -a IDS <<< "$FILER_IDS"
+          xvfb-run --auto-servernum python scraper/diff_coverage.py \
+            --filer-ids "${IDS[@]}" --recheck --require-no-missing \
+            --start-year 2006 --end-date "$END_DATE" --max-minutes 70
+
+      - name: Audit post-merge identity evidence and publication safety
+        id: identity_verify
+        if: >-
+          always() && !cancelled() && inputs.recovery_mode == 'identity_backfill' &&
+          steps.identity_start.outcome == 'success'
+        continue-on-error: true
+        run: |
+          STATUS=0
+          python scraper/bounded_identity_recovery.py verify \
+            --plan "$IDENTITY_PLAN_PATH" --verification-start "$IDENTITY_VERIFY_START_PATH" \
+            --output "$IDENTITY_REPORT_PATH" || STATUS=$?
+          echo "publication_safe=$(jq -r '.publication_safe == true' "$IDENTITY_REPORT_PATH")" >> "$GITHUB_OUTPUT"
+          exit "$STATUS"
+
+      # Publish truthful partial evidence and project durable raw facts even
+      # when identity verification fails. Terminal status below still fails.
+      - name: Publish truthful post-merge exact evidence
+        id: identity_publish
+        if: >-
+          always() && !cancelled() && inputs.recovery_mode == 'identity_backfill' &&
+          steps.identity_raw_publish.outcome == 'success' &&
+          steps.identity_verify.outputs.publication_safe == 'true'
+        run: python scripts/pipeline_state.py push auxiliary
+
+      - name: Freeze published identity projection inputs
+        id: identity_projection_start
+        if: always() && !cancelled() && steps.identity_publish.outcome == 'success'
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from scripts import pipeline_state as state
+
+          root = Path.cwd()
+          base = state._read_base(root)
+          manifest = state._read_manifest(root)
+          if (base is None or manifest is None
+                  or set(base['hydrated_profiles']) != set(state.PROFILE_NAMES)
+                  or base['generation'] != manifest['generation']):
+              raise SystemExit('Projection requires all profiles from the current published generation')
+          snapshot = state._transaction_snapshot_id(root)
+          if (not state._valid_snapshot_id(snapshot)
+                  or snapshot != base.get('transaction_snapshot_id')
+                  or snapshot != manifest['profiles']['transactions']['transaction_snapshot_id']):
+              raise SystemExit('Hydrated transaction snapshot does not match the published generation')
+          if any((root / 'data' / '_raw').glob('*.xls*')):
+              raise SystemExit('Aggregate-only projection refuses unmerged raw exports')
+          checkpoints = {}
+          for profile in state.PROFILE_NAMES:
+              for name, expected in manifest['profiles'][profile]['archive']['members'].items():
+                  path = root / name
+                  if (not path.is_file() or path.stat().st_size != expected['size']
+                          or state._sha256_path(path) != expected['sha256']):
+                      raise SystemExit('Hydrated checkpoint does not match the published generation')
+                  checkpoints[name] = expected
+          frozen = {'generation': base['generation'], 'transaction_snapshot_id': snapshot,
+                    'started_at': datetime.now(timezone.utc).isoformat(),
+                    'checkpoints': checkpoints}
+          Path(os.environ['PROJECTION_INPUTS_PATH']).write_text(json.dumps(frozen))
+          print(f"BALANCE_PROJECTION_INPUT generation={base['generation']} snapshot={snapshot}")
+          PY
+
+
+      - name: Project durable recovered facts into balance caches
+        id: identity_aggregate
+        if: always() && !cancelled() && steps.identity_projection_start.outcome == 'success'
+        # Same aggregation as "Re-aggregate from durable evidence" below.
+        timeout-minutes: 60
+        run: python scraper/process.py
+
+      - name: Re-key donors after the recovered projection
+        id: identity_donors
+        if: always() && !cancelled() && steps.identity_aggregate.outcome == 'success'
+        timeout-minutes: 15
+        run: python scraper/refresh_donor_aggregates.py
+
+      - name: Verify the recovered projection was published unchanged
+        id: identity_projection_verify
+        if: always() && !cancelled() && steps.identity_donors.outcome == 'success'
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from scripts import pipeline_state as state
+
+          root = Path.cwd()
+          sys.path.insert(0, str(root / 'scraper'))
+          import balance_snapshot as balances
+          import supabase_sync
+
+          frozen = json.loads(Path(os.environ['PROJECTION_INPUTS_PATH']).read_text())
+          manifest = state._read_manifest(root)
+          if (manifest is None or manifest['generation'] != frozen['generation']
+                  or manifest['profiles']['transactions']['transaction_snapshot_id']
+                  != frozen['transaction_snapshot_id']
+                  or state._transaction_snapshot_id(root) != frozen['transaction_snapshot_id']):
+              raise SystemExit('Published state or local ledger changed during projection')
+          for name, expected in frozen['checkpoints'].items():
+              path = root / name
+              if (not path.is_file() or path.stat().st_size != expected['size']
+                      or state._sha256_path(path) != expected['sha256']):
+                  raise SystemExit('Projection unexpectedly changed an input checkpoint')
+          source = json.loads((root / 'data/aggregated/balance_snapshot_source.json').read_text())
+          report = json.loads((root / 'data/aggregated/balance_discrepancies.json').read_text())
+          if (source != supabase_sync.require_dashboard_cache('balance_snapshot_source')
+                  or report != supabase_sync.require_dashboard_cache('balance_discrepancies')):
+              raise SystemExit('Published balance source/report differs from this projection')
+          if (source.get('version') != balances.FORMAT_VERSION
+                  or source.get('calculation_version') != balances.CALCULATION_VERSION
+                  or source.get('transaction_snapshot_id') != frozen['transaction_snapshot_id']
+                  or not isinstance(source.get('scopes'), dict)
+                  or report.get('schema_version') != 2
+                  or report.get('basis') != 'paired_capture_window_v1'):
+              raise SystemExit('Published balance source/report has an unexpected schema or snapshot')
+          def utc(value):
+              parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+              # process.py emits report.generated without an offset; TZ=UTC is set above.
+              return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+          if not (utc(frozen['started_at']) <= utc(source['created_at'])
+                  <= utc(report['generated']) <= datetime.now(timezone.utc)):
+              raise SystemExit('Balance source/report does not describe this completed projection')
+          for count, rows in (('flagged', 'rows'), ('refresh_needed', 'refresh_rows'),
+                              ('unpaired', 'unpaired_rows'), ('nonactionable', 'nonactionable_rows')):
+              if (type(report.get(count)) is not int or not isinstance(report.get(rows), list)
+                      or report[count] != len(report[rows])):
+                  raise SystemExit('Balance report counts do not match its evidence rows')
+          print('BALANCE_PROJECTION_RESULT ' + json.dumps({
+              'generation': frozen['generation'], 'transaction_snapshot_id': frozen['transaction_snapshot_id'],
+              'source_created_at': source['created_at'], 'report_generated': report['generated'],
+              'actionable': report['flagged'], 'refresh_needed': report['refresh_needed'],
+              'unpaired': report['unpaired'], 'nonactionable': report['nonactionable'],
+          }, sort_keys=True))
+          PY
+
+
+      - name: Preserve identity recovery audit receipts
+        id: identity_artifact
+        if: always() && !cancelled() && inputs.recovery_mode == 'identity_backfill' && steps.identity_plan.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: identity-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            /tmp/identity-recovery-plan.json
+            /tmp/identity-recovery-plan.json.fetched.json
+            /tmp/identity-verification-start.json
+            /tmp/identity-recovery-report.json
+            /tmp/identity-projection-inputs.json
+            /tmp/atomic-search-budget.json
+
+      - name: Enforce truthful identity recovery terminal status
+        if: always() && !cancelled() && inputs.recovery_mode == 'identity_backfill'
+        env:
+          FETCH: ${{ steps.identity_fetch.outcome }}
+          FETCHED: ${{ steps.identity_fetched.outcome }}
+          MERGE: ${{ steps.identity_merge.outcome }}
+          RAW_PUBLISH: ${{ steps.identity_raw_publish.outcome }}
+          DIFF: ${{ steps.identity_diff.outcome }}
+          VERIFY: ${{ steps.identity_verify.outcome }}
+          PUBLISH: ${{ steps.identity_publish.outcome }}
+          AGGREGATE: ${{ steps.identity_aggregate.outcome }}
+          DONORS: ${{ steps.identity_donors.outcome }}
+          PROJECTION: ${{ steps.identity_projection_verify.outcome }}
+          ARTIFACT: ${{ steps.identity_artifact.outcome }}
+        run: |
+          for OUTCOME in "$FETCH" "$FETCHED" "$MERGE" "$RAW_PUBLISH" "$DIFF" "$VERIFY" "$PUBLISH" "$AGGREGATE" "$DONORS" "$PROJECTION" "$ARTIFACT"; do
+            if [ "$OUTCOME" != success ]; then
+              echo "::error::Identity recovery is incomplete. Preserve actual published facts; do not retry or chain this attempt."
+              exit 1
+            fi
+          done
+          jq -e '.verified == true and .publication_safe == true and .terminal_cash_accepted == false' "$IDENTITY_REPORT_PATH" > /dev/null
+          echo "Identity completeness verified; balances still require a new paired capture window."
+
+      - name: Capture fresh summaries for planned scopes
+        id: summaries
+        if: inputs.recovery_mode != 'identity_backfill' && steps.plan.outputs.filer_ids != ''
+        continue-on-error: true
+        env:
+          FILER_IDS: ${{ steps.plan.outputs.filer_ids }}
+        run: |
+          read -r -a IDS <<< "$FILER_IDS"
+          xvfb-run --auto-servernum python scraper/fetch_earliest_balances.py \
+            --filer-ids "${IDS[@]}" --force --current-only
+
+      - name: Select scopes paired inside this window
+        id: ready
+        if: inputs.recovery_mode != 'identity_backfill' && always() && !cancelled() && steps.plan.outcome == 'success' && steps.plan.outputs.filer_ids != ''
+        run: |
+          python scraper/atomic_balance_evidence.py ready \
+            --plan "$PLAN_PATH" --output "$READY_PATH"
+          FILER_IDS=$(jq -r '[.scopes[].filer_ids[]] | unique | join(" ")' "$READY_PATH")
+          echo "filer_ids=$FILER_IDS" >> "$GITHUB_OUTPUT"
+          echo "ready_scopes=$(jq -r '.ready_scope_count' "$READY_PATH")" >> "$GITHUB_OUTPUT"
+          echo "rejected_scopes=$(jq -r '.rejected_scope_count' "$READY_PATH")" >> "$GITHUB_OUTPUT"
+          echo "end_date=$(jq -r '.end_date' "$READY_PATH")" >> "$GITHUB_OUTPUT"
+
+      - name: Diff exactly the freshly paired scopes
+        id: diff
+        if: >-
+          inputs.recovery_mode != 'identity_backfill' && always() && !cancelled() && steps.summaries.outcome == 'success' &&
+          steps.ready.outcome == 'success' &&
+          steps.ready.outputs.filer_ids != ''
+        continue-on-error: true
+        env:
+          END_DATE: ${{ steps.ready.outputs.end_date }}
+        run: |
+          xvfb-run --auto-servernum python scraper/diff_coverage.py \
+            --scope-plan "$READY_PATH" --recheck --start-year 2006 \
+            --end-date "$END_DATE" --max-minutes 70
+
+      - name: Verify atomic exact evidence
+        id: verify
+        if: inputs.recovery_mode != 'identity_backfill' && always() && !cancelled() && steps.ready.outcome == 'success'
+        run: |
+          python scraper/atomic_balance_evidence.py verify \
+            --plan "$READY_PATH" --output "$REPORT_PATH"
+          echo "certified_scopes=$(jq -r '.certified_scope_count' "$REPORT_PATH")" >> "$GITHUB_OUTPUT"
+          echo "certified_filers=$(jq -r '.certified_filer_count' "$REPORT_PATH")" >> "$GITHUB_OUTPUT"
+          echo "blocked_filers=$(jq -r '.blocked_filer_count' "$REPORT_PATH")" >> "$GITHUB_OUTPUT"
+          echo "missing_ids=$(jq -r '.missing_id_count' "$REPORT_PATH")" >> "$GITHUB_OUTPUT"
+          echo "surplus_ids=$(jq -r '.surplus_id_count' "$REPORT_PATH")" >> "$GITHUB_OUTPUT"
+
+      # Both evidence profiles advance in one manifest generation. A partial
+      # summary or diff is still truthful state; the validator simply refuses
+      # to call its incomplete scope certified.
+      - name: Publish atomic evidence state
+        id: publish
+        if: inputs.recovery_mode != 'identity_backfill' && always() && !cancelled() && steps.state.outcome == 'success' && steps.verify.outcome == 'success'
+        run: python scripts/pipeline_state.py push summaries auxiliary
+
+      - name: Re-aggregate from durable evidence
+        id: aggregate
+        if: inputs.recovery_mode != 'identity_backfill' && always() && !cancelled() && steps.publish.outcome == 'success'
+        # 17-28 minutes over 26 runs (2026-09-12..23).
+        timeout-minutes: 60
+        run: python scraper/process.py
+
+      # process.py rebuilds every filer_detail donor blob from the raw
+      # transaction labels, which drops donor_key/donor_id and with them the
+      # resolver's work and every merge saved at /admin/donors. Without this,
+      # the Recommend tab cannot read a contributor category for any donor.
+      - name: Re-key donors after the durable-evidence aggregation
+        if: always() && !cancelled() && steps.aggregate.outcome == 'success'
+        # ~2.5 minutes wherever it runs (max 3.6).
+        timeout-minutes: 15
+        run: python scraper/refresh_donor_aggregates.py
+
+      - name: Stabilize captured cash against fresh exact evidence
+        id: stabilize
+        if: >-
+          inputs.recovery_mode != 'identity_backfill' && always() && !cancelled() && steps.aggregate.outcome == 'success' &&
+          steps.summaries.outcome == 'success' &&
+          steps.diff.outcome == 'success' &&
+          steps.ready.outputs.ready_scopes == steps.plan.outputs.selected_scopes &&
+          steps.verify.outputs.certified_scopes == steps.plan.outputs.selected_scopes &&
+          steps.plan.outputs.filer_ids != ''
+        run: |
+          xvfb-run --auto-servernum python scraper/stabilize_atomic_balances.py \
+            --plan "$READY_PATH" --max-passes "${{ steps.effort.outputs.max_passes }}"
+
+      # If a prior run published both profiles but died during process.py, its
+      # exact rows may make this plan empty. Re-running must still be able to
+      # finish projecting that already-durable evidence into the app caches.
+      - name: Recover aggregation when the atomic plan is empty
+        id: recover_aggregate
+        if: >-
+          inputs.recovery_mode != 'identity_backfill' && steps.plan.outcome == 'success' &&
+          steps.plan.outputs.filer_ids == ''
+        timeout-minutes: 60
+        run: python scraper/process.py
+
+      - name: Re-key donors after the empty-plan recovery aggregation
+        if: always() && !cancelled() && steps.recover_aggregate.outcome == 'success'
+        timeout-minutes: 15
+        run: python scraper/refresh_donor_aggregates.py
+
+      - name: Replan after recovering empty-plan aggregation
+        id: recovery_plan
+        if: inputs.recovery_mode != 'identity_backfill' && steps.recover_aggregate.outcome == 'success'
+        env:
+          MAX_SCOPES: ${{ steps.effort.outputs.max_scopes }}
+          MAX_SEARCHES: ${{ steps.effort.outputs.max_searches }}
+          EXCLUDED_FILER_IDS: ${{ steps.effort.outputs.excluded_filer_ids }}
+          MAX_PASSES: ${{ steps.effort.outputs.max_passes }}
+          SINGLE_PASS_FILER_IDS: ${{ steps.effort.outputs.single_pass_filer_ids }}
+        run: |
+          read -r -a EXCLUDED <<< "$EXCLUDED_FILER_IDS"
+          read -r -a SINGLE_PASS <<< "$SINGLE_PASS_FILER_IDS"
+          python scraper/atomic_balance_evidence.py plan \
+            --max-scopes "$MAX_SCOPES" --max-searches "$MAX_SEARCHES" \
+            --max-passes "$MAX_PASSES" --single-pass-filer-ids "${SINGLE_PASS[@]}" \
+            --search-cost-hints .github/atomic-search-costs.json \
+            --exclude-filer-ids "${EXCLUDED[@]}" --output /tmp/atomic-recovery-plan.json
+          SELECTED=$(jq -r '.selected_scope_count' /tmp/atomic-recovery-plan.json)
+          echo "selected_scopes=$SELECTED" >> "$GITHUB_OUTPUT"
+          echo "Recovered aggregation exposed $SELECTED scopes needing another real capture window."
+
+      - name: Enforce truthful terminal status
+        if: inputs.recovery_mode != 'identity_backfill' && always() && !cancelled() && steps.plan.outputs.filer_ids != ''
+        run: |
+          if [ "${{ steps.summaries.outcome }}" != "success" ]; then
+            echo "::error::Summary capture failed; exact coverage was not started on the refusing runner."
+            exit 1
+          fi
+          if [ "${{ steps.ready.outputs.ready_scopes }}" != "${{ steps.plan.outputs.selected_scopes }}" ]; then
+            echo "::error::Not every selected scope produced a fresh paired summary."
+            exit 1
+          fi
+          if [ "${{ steps.diff.outcome }}" != "success" ]; then
+            echo "::error::At least one exact scope was unusable; no partial scope was certified."
+            exit 1
+          fi
+          if [ "${{ steps.publish.outcome }}" != "success" ]; then
+            echo "::error::Atomic summary/diff state was not published."
+            exit 1
+          fi
+          if [ "${{ steps.aggregate.outcome }}" != "success" ]; then
+            echo "::error::Atomic evidence was saved, but final aggregation failed."
+            exit 1
+          fi
+          if [ "${{ steps.verify.outputs.certified_scopes }}" != "${{ steps.plan.outputs.selected_scopes }}" ]; then
+            echo "::error::Not every selected scope produced certifiable same-window evidence."
+            exit 1
+          fi
+          if [ "${{ steps.stabilize.outcome }}" != "success" ]; then
+            echo "::error::Captured cash did not settle against the freshly projected exact evidence."
+            exit 1
+          fi
+          echo "Atomic batch certified ${{ steps.verify.outputs.certified_scopes }} complete scopes."
+
+      - name: Continue bounded evidence chain
+        if: >-
+          success() && !cancelled() && inputs.recovery_mode != 'identity_backfill' &&
+          inputs.filer_ids == '' &&
+          steps.effort.outputs.max_passes == '3' &&
+          ((steps.verify.outputs.certified_scopes != '' &&
+          steps.verify.outputs.certified_scopes != '0') ||
+          (steps.recovery_plan.outputs.selected_scopes != '' &&
+          steps.recovery_plan.outputs.selected_scopes != '0'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_CHAIN: ${{ steps.effort.outputs.max_attempts }}
+          MAX_SCOPES: ${{ steps.effort.outputs.max_scopes }}
+          CHAIN_INDEX: ${{ inputs.chain_index }}
+          EFFORT_ID: ${{ steps.effort.outputs.effort_id }}
+        run: |
+          python scripts/atomic_evidence_effort.py handoff \
+            --effort-id "$EFFORT_ID" > /tmp/atomic-handoff.json
+          if [ "$(jq -r '.can_dispatch' /tmp/atomic-handoff.json)" != "true" ]; then
+            echo "The persistent effort limit is exhausted or disabled; stopping."
+            exit 0
+          fi
+          CHAIN="${CHAIN_INDEX:-1}"
+          case "$CHAIN" in
+            ''|*[!0-9]*) echo "::error::Invalid atomic chain index."; exit 1 ;;
+          esac
+          if [ "$CHAIN" -ge "$MAX_CHAIN" ]; then
+            echo "Reached the $MAX_CHAIN-batch evidence-chain limit; yielding the ORESTAR lane."
+            exit 0
+          fi
+          if [ "${{ steps.recovery_plan.outputs.selected_scopes || '0' }}" -gt 0 ]; then
+            echo "Recovered aggregation left ${{ steps.recovery_plan.outputs.selected_scopes }} scopes to capture; queueing atomic batch $((CHAIN + 1))."
+          else
+            echo "Certified ${{ steps.verify.outputs.certified_scopes }} scopes; queueing atomic batch $((CHAIN + 1))."
+          fi
+          # One dispatch attempt is deliberate. Retrying an ambiguous accepted
+          # request can create two children for the same logical batch.
+          gh workflow run atomic-balance-evidence.yml \
+            --ref "$GITHUB_REF_NAME" \
+            -f effort_id="$EFFORT_ID" \
+            -f filer_ids= \
+            -f max_passes=3 \
+            -f max_scopes="$MAX_SCOPES" \
+            -f chain_index="$((CHAIN + 1))"

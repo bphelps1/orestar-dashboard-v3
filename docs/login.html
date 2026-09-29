@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — Oregon Campaign Finance</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="recommend.css" />
+  <link rel="stylesheet" href="login.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">Public ORESTAR data · Updated daily · 2006–present</p>
+  </div>
+</header>
+
+<nav class="tab-nav" role="tablist">
+  <div class="tab-nav-inner">
+    <a class="tab-btn tab-link" href="/">← Dashboard</a>
+    <a class="tab-btn tab-link" href="/explore">Explore</a>
+    <a class="tab-btn tab-link" href="/donors">Donor Lookup</a>
+    <span class="tab-sep" aria-hidden="true"></span>
+    <a class="tab-btn tab-login active" id="login-tab" href="/login" aria-current="page">Login</a>
+  </div>
+</nav>
+
+<main>
+
+  <!-- Signed out -->
+  <div id="login-form" class="login-container" hidden>
+    <div class="login-box">
+      <h2>Sign in</h2>
+      <p class="login-desc" id="login-desc">Donor recommendations and the admin tools are for authorized users.</p>
+      <form id="login-form-el" autocomplete="on">
+        <label for="login-email">Email</label>
+        <input type="email" id="login-email" required autocomplete="email" />
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" required autocomplete="current-password" />
+        <button type="submit" class="btn-primary" id="login-btn">Sign in</button>
+        <p class="login-error" id="login-error" hidden></p>
+      </form>
+    </div>
+    <p class="login-note">
+      The dashboard, <a href="/explore">Explore</a> and <a href="/donors">Donor Lookup</a> are public &mdash; no account needed.
+    </p>
+  </div>
+
+  <!-- Signed in -->
+  <section id="tools-hub" class="tools-hub" hidden>
+    <div class="tools-hub-head">
+      <h2>Campaign tools</h2>
+      <span class="tools-account" hidden>
+        <span class="tools-user" id="user-info"></span>
+        <button type="button" class="btn-small" id="sign-out-btn">Sign Out</button>
+      </span>
+    </div>
+
+    <div class="tool-cards">
+      <a class="tool-card" href="/recommend">
+        <h3>Donor recommendations</h3>
+        <p>Call lists for a candidate or a chamber.</p>
+        <span class="tool-card-go">Open Recommend &rarr;</span>
+      </a>
+      <a class="tool-card" href="/admin/lobbyists" data-needs-admin hidden>
+        <h3>Lobbyist attribution <span class="tool-card-tag">Admin</span></h3>
+        <p>Admin tools.</p>
+        <span class="tool-card-go">Open Lobbyists &rarr;</span>
+      </a>
+      <a class="tool-card" href="/admin/donors" data-needs-admin hidden>
+        <h3>Donor admin <span class="tool-card-tag">Admin</span></h3>
+        <p>Review and merge duplicate donors, link candidates to their committees, and check balance discrepancies.</p>
+        <span class="tool-card-go">Open Donor admin &rarr;</span>
+      </a>
+    </div>
+
+    <p class="tools-hub-foot">
+      <a href="/recommend/how-it-works">How Recommend works</a>
+    </p>
+  </section>
+
+</main>
+
+<footer>
+  <p>
+    Source: <a href="https://secure.sos.state.or.us/orestar/" target="_blank" rel="noopener">Oregon Secretary of State — ORESTAR</a>
+  </p>
+</footer>
+
+<script src="lib/supabase.js"></script>
+<script src="login.js"></script>
+</body>
+</html>

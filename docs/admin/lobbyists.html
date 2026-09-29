@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lobbyist Attribution Admin — Oregon Campaign Finance</title>
+  <link rel="stylesheet" href="../style.css" />
+  <link rel="stylesheet" href="../recommend.css" />
+  <link rel="stylesheet" href="donors.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">
+      Lobbyist attribution
+    </p>
+  </div>
+</header>
+
+<nav class="tab-nav tools-nav" aria-label="Campaign tools">
+  <div class="tab-nav-inner">
+    <a class="tab-btn tab-link" href="/">← Dashboard</a>
+    <a class="tab-btn" href="/recommend">Recommend</a>
+    <a class="tab-btn active" href="/admin/lobbyists" aria-current="page">Lobbyists</a>
+    <a class="tab-btn" href="/admin/donors" data-needs-admin hidden>Donor admin</a>
+    <span class="tab-sep tools-account" aria-hidden="true" hidden></span>
+    <span class="tools-account" hidden>
+      <span class="tools-user" id="user-info"></span>
+      <button type="button" class="btn-small" id="sign-out-btn">Sign Out</button>
+    </span>
+  </div>
+</nav>
+
+<main id="app-content" hidden>
+  <p class="loading-msg">Loading…</p>
+</main>
+
+<footer>
+  <p>Oregon Campaign Finance &mdash; Lobbyist Attribution Admin</p>
+</footer>
+
+<script src="../lib/donor-names.js"></script>
+  <script src="../lib/supabase.js"></script>
+<script src="../lib/identity.js"></script>
+<script>
+// Admins and reviewers only. requireAdmin sends signed-out visitors to /login
+// and shows anyone else a notice; the page itself loads only after that check.
+document.addEventListener("DOMContentLoaded", async () => {
+  const session = await requireAdmin();
+  if (!session) return;
+  if (await loadPrivatePage({ markup: "admin/lobbyists.html", styles: ["admin/lobbyists.css"],
+                              scripts: ["lib/lobbyists.js", "admin/lobbyists.js"] })) {
+    await startLobbyists(session);
+  }
+});
+</script>
+</body>
+</html>

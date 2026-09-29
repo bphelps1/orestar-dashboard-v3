@@ -1,0 +1,47 @@
+# The docs/*.js unit tests, which nothing ran until now.
+#
+# They are Node's built-in test runner over plain .cjs files — no package.json,
+# no dependencies, no install step. The dashboard is static files served from
+# docs/, so Node is only ever a test harness here, never a build step.
+#
+# These tests read docs/app.js and docs/admin/donors.js as text and
+# evaluate slices of them in a vm sandbox, because those files are browser
+# scripts rather than modules. That makes them sensitive to a renamed function
+# or a moved comment banner, which is exactly the drift CI should catch.
+name: Front-end tests
+
+on:
+  pull_request:
+    paths:
+      - "docs/**/*.js"
+      - "tests/*.test.cjs"
+      - ".github/workflows/frontend-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**/*.js"
+      - "tests/*.test.cjs"
+      - ".github/workflows/frontend-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run the front-end tests
+        # An explicit glob rather than the directory: tests/ also holds the
+        # Python suite, and this should never quietly widen to it.
+        run: node --test tests/*.test.cjs

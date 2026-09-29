@@ -1,0 +1,29 @@
+name: Current Legislator Roster
+on:
+  schedule:
+    - cron: '0 16 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  refresh:
+    if: github.event_name == 'workflow_dispatch' || vars.PIPELINE_SCHEDULES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests beautifulsoup4
+      - run: python scraper/refresh_legislators.py
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: codex/refresh-current-legislators
+          add-paths: |
+            docs/assets/current_legislators.json
+            docs/assets/current_committee_chairs.json
+          commit-message: Update current Oregon legislator roster
+          title: Update current Oregon legislator roster
+          body: Official membership or committee-chair assignments changed. Review the roster diff before merging; these assets establish current membership and comparison roles.

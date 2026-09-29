@@ -1,0 +1,253 @@
+{
+  "verified_on": "2026-09-22",
+  "sources": {
+    "assignments": "https://olis.oregonlegislature.gov/liz/committees/assignments/committee"
+  },
+  "chairs": [
+    {
+      "chamber": "house",
+      "name": "Annessa Hartman",
+      "committees": [
+        "Early Childhood and Human Services (Inactive)"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Ben Bowman",
+      "committees": [
+        "Rules"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Dacia Grayber",
+      "committees": [
+        "Labor and Workforce Development"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Daniel Nguyen",
+      "committees": [
+        "Economic Development, Small Business, and Trade"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "David Gomberg",
+      "committees": [
+        "Blue Economy"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Hai Pham",
+      "committees": [
+        "Behavioral Health"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Jason Kropf",
+      "committees": [
+        "Judiciary"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Jules Walters",
+      "committees": [
+        "Early Childhood"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Lisa Fragala",
+      "committees": [
+        "Higher Education"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Mark Gamba",
+      "committees": [
+        "Climate, Energy, and Environment"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Nancy Nathanson",
+      "committees": [
+        "Revenue"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Nathan Sosa",
+      "committees": [
+        "Commerce and Consumer Protection"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Pam Marsh",
+      "committees": [
+        "Housing and Homelessness"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Rob Nosse",
+      "committees": [
+        "Health Care"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Susan McLain",
+      "committees": [
+        "Transportation"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Tawna Sanchez",
+      "committees": [
+        "Ways and Means"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Thuy Tran",
+      "committees": [
+        "Emergency Management and Veterans"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Travis Nelson",
+      "committees": [
+        "Human Services"
+      ]
+    },
+    {
+      "chamber": "house",
+      "name": "Zach Hudson",
+      "committees": [
+        "Education"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Anthony Broadman",
+      "committees": [
+        "Finance and Revenue"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Chris Gorsek",
+      "committees": [
+        "Transportation"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Deb Patterson",
+      "committees": [
+        "Health Care"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Floyd Prozanski",
+      "committees": [
+        "Judiciary"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "James Manning Jr.",
+      "committees": [
+        "Veterans, Emergency Management, Federal and World Affairs"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Janeen Sollman",
+      "committees": [
+        "Energy and Environment"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Jeff Golden",
+      "committees": [
+        "Natural Resources and Wildfire"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Kate Lieber",
+      "committees": [
+        "Ways and Means"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Kathleen Taylor",
+      "committees": [
+        "Labor and Business"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Kayse Jama",
+      "committees": [
+        "Rules and Executive Appointments"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Khanh Pham",
+      "committees": [
+        "Housing and Development"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Kim Thatcher",
+      "committees": [
+        "Transparency Oregon Advisory Commission"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Lew Frederick",
+      "committees": [
+        "Education"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Lisa Reynolds",
+      "committees": [
+        "Early Childhood and Behavioral Health"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Mark Meek",
+      "committees": [
+        "Commerce and General Government"
+      ]
+    },
+    {
+      "chamber": "senate",
+      "name": "Sara Gelser Blouin",
+      "committees": [
+        "Human Services"
+      ]
+    }
+  ]
+}

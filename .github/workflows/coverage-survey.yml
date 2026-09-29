@@ -1,0 +1,234 @@
+name: Coverage Survey (which committees are actually missing rows)
+
+# Asks ORESTAR how many records it holds for each flagged committee and
+# compares that against what we hold. One search each, no exports — the point
+# is to find out where the backfill can help BEFORE spending the request
+# budget on committees that have nothing to fetch.
+#
+# Committee for SAIF Keeping tops the discrepancy list at $665,242 and has
+# seven transactions in ORESTAR, all seven of which we hold. Backfilling it
+# would cost a run and change nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Stop after this many committees (0 = until rate-limited)"
+        required: false
+        default: "0"
+        type: string
+      filer_ids:
+        description: "Space-separated filer IDs, or blank for all flagged committees"
+        required: false
+        default: ""
+        type: string
+      recheck:
+        description: "Re-survey committees already recorded"
+        required: false
+        default: "false"
+        type: boolean
+      chain_index:
+        description: "Internal: which run of the retrigger chain this is"
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+  actions: write
+
+# A replacement dispatched after a coordination timeout must not share a
+# pending slot with a later manual/scheduled run: GitHub would evict the older
+# waiter. Runtime serialization is handled fail-closed by await-orestar.
+concurrency:
+  group: coverage-survey-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  survey:
+    runs-on: ubuntu-latest
+    # 30m coordination wait + up to 25m browser install + the collector's
+    # 70m self-deadline, with room to persist and dispatch the next slice.
+    timeout-minutes: 180
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Wait for other ORESTAR jobs
+        id: orestar_wait
+        continue-on-error: true
+        uses: ./.github/actions/await-orestar
+        with:
+          max-wait-minutes: "30"
+          fail-on-timeout: "true"
+
+      - name: Requeue after coordination timeout
+        if: steps.orestar_wait.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/dispatch_retry.sh coverage-survey.yml --ref "${{ github.ref_name }}" \
+            -f limit="${{ inputs.limit }}" \
+            -f filer_ids="${{ inputs.filer_ids }}" \
+            -f recheck="${{ inputs.recheck }}" \
+            -f chain_index="${{ inputs.chain_index }}"
+
+      - name: Refuse uncoordinated coverage survey
+        if: steps.orestar_wait.outcome == 'failure'
+        run: |
+          echo "::error::ORESTAR remained busy; queued the same survey slice instead of overlapping it."
+          exit 1
+
+      - name: Refresh branch after coordination wait
+        # coverage_survey.json is cumulative. Another serialized run may have
+        # extended it while this run waited, so scrape from that exact tip.
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Hydrate survey state
+        run: python scripts/pipeline_state.py pull auxiliary
+
+      - name: Install Playwright browser + system dependencies
+        # Bounded and retried: a hung install held the ORESTAR lane for 3 hours
+        # against the job's 300-minute timeout. 18 minutes is the backstop for
+        # the script's own 3 x 300s cap.
+        timeout-minutes: 25
+        run: bash scripts/install_playwright.sh
+
+      - name: Install Xvfb (virtual display for headed browser)
+        run: sudo apt-get install -y xvfb
+
+      - name: Survey coverage
+        id: survey
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.filer_ids }}" ]; then
+            ARGS="$ARGS --filer-ids ${{ inputs.filer_ids }}"
+          fi
+          if [ "${{ inputs.limit }}" != "0" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          if [ "${{ inputs.recheck }}" = "true" ]; then
+            ARGS="$ARGS --recheck"
+          fi
+          # Comfortably inside the post-coordination job budget, so the script
+          # always stops itself rather than being killed mid-run.
+          ARGS="$ARGS --max-minutes 70"
+          xvfb-run --auto-servernum python scraper/survey_coverage.py $ARGS 2>&1 | tee /tmp/survey.log
+
+          # How much this run actually achieved, taken from the script's own
+          # report rather than inferred from a git diff. A chain that decides
+          # whether to continue by guessing is how a backfill chain previously
+          # kept re-queueing runs that were doing nothing.
+          SURVEYED=$(grep -oE "Surveyed [0-9]+ committees this run" /tmp/survey.log | grep -oE "[0-9]+" | head -1)
+          REMAINING=$(grep -oE "[0-9]+ committees flagged, [0-9]+ already surveyed, [0-9]+ to go" /tmp/survey.log | grep -oE "[0-9]+" | tail -1)
+          echo "surveyed=${SURVEYED:-0}" >> "$GITHUB_OUTPUT"
+          echo "This run surveyed ${SURVEYED:-0} committees (${REMAINING:-?} were outstanding at the start)."
+
+      # always(), NOT !cancelled().
+      #
+      # A job timeout is reported as "cancelled", so !cancelled() skips this
+      # step exactly when it matters most. The first real survey run spent 90
+      # minutes measuring 96 committees, hit the job timeout, and threw away
+      # every one of them — the script saves progress after each committee
+      # precisely so a cut-off run keeps what it learned, and then the publish
+      # step refused to run. A guard that fires on the case it was written to
+      # protect is worse than no guard.
+      - name: Publish survey state
+        id: commit
+        if: always() && steps.orestar_wait.outcome == 'success'
+        run: python scripts/pipeline_state.py push auxiliary
+
+      - name: Re-trigger if the survey is unfinished
+        # A manual cancellation is a request to stop the chain, not to create
+        # its replacement. The publish step above may still preserve partial
+        # progress, but only a non-cancelled run may dispatch a successor.
+        if: always() && !cancelled() && steps.orestar_wait.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          # F5 blocks a runner after a few dozen requests, so one run covers a
+          # slice of the list. Chain another rather than making someone
+          # re-dispatch 1,617 committees' worth of surveying by hand.
+          #
+          # Two hard stops, because an unbounded chain that makes no progress is
+          # worse than no chain: 40 runs maximum, and a run that surveyed ZERO
+          # committees ends it — continuing would only queue more blocked runs.
+          CHAIN=${{ inputs.chain_index }}
+          if [ "${{ steps.survey.outcome }}" != "success" ]; then
+            echo "Survey step did not finish successfully — stopping the chain."
+            exit 0
+          fi
+          if [ "${{ steps.commit.outcome }}" != "success" ]; then
+            echo "Survey results were not published successfully — stopping the chain."
+            exit 0
+          fi
+          if [ "$CHAIN" -ge 40 ]; then
+            echo "Chain limit reached ($CHAIN) — stopping."
+            exit 0
+          fi
+          if [ "${{ steps.survey.outputs.surveyed }}" = "0" ]; then
+            echo "This run surveyed nothing — stopping the chain rather than queueing another block."
+            exit 0
+          fi
+          if python3 - <<'EOF'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, "scraper")
+          import supabase_sync
+          from survey_coverage import _evidence_is_current, _expand_actionable_rows
+          p = Path("data/coverage_survey.json")
+          evidence = {
+              str(e["filer_id"]): e for e in json.loads(p.read_text())
+          } if p.exists() else {}
+          conn = supabase_sync._connect()
+          with conn.cursor() as cur:
+              cur.execute("select data from dashboard_cache where key = 'balance_discrepancies'")
+              d = cur.fetchone()[0]
+          conn.close()
+          if isinstance(d, str):
+              d = json.loads(d)
+          if isinstance(d, dict):
+              rows = d.get("rows")
+              if rows is None:
+                  rows = d.get("filers", [])
+          else:
+              rows = d
+          active = _expand_actionable_rows(rows or [])
+          todo = {
+              str(r["filer_id"]) for r in active
+              if not _evidence_is_current(evidence.get(str(r["filer_id"])), r)
+          }
+          print(f"{len(todo)} committees still unsurveyed")
+          sys.exit(0 if todo else 1)
+          EOF
+          then
+            NEXT=$((CHAIN + 1))
+            echo "Chaining run $NEXT..."
+            bash scripts/dispatch_retry.sh coverage-survey.yml --ref ${{ github.ref_name }} \
+              -f chain_index="$NEXT" \
+              -f limit="${{ inputs.limit }}" \
+              -f filer_ids="${{ inputs.filer_ids }}" \
+              -f recheck="${{ inputs.recheck }}"
+          else
+            echo "Survey complete — every flagged committee has been checked."
+          fi

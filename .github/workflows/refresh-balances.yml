@@ -1,0 +1,174 @@
+name: Refresh Balance Projections
+
+# Project already-published remediation evidence. This job does not collect
+# ORESTAR data or certify that every outstanding discrepancy is resolved.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: balance-projection-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  project:
+    runs-on: ubuntu-latest
+    # 45-minute coordination wait plus full aggregation and donor re-keying.
+    timeout-minutes: 180
+    env:
+      TZ: UTC
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+      PROJECTION_INPUTS_PATH: /tmp/balance-projection-inputs.json
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Wait for other ORESTAR jobs
+        uses: ./.github/actions/await-orestar
+        with:
+          fail-on-timeout: "true"
+
+      - name: Refresh branch after coordination wait
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Hydrate published projection inputs
+        run: python scripts/pipeline_state.py pull transactions summaries auxiliary
+
+      - name: Validate and freeze projection inputs
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from scripts import pipeline_state as state
+
+          root = Path.cwd()
+          base = state._read_base(root)
+          manifest = state._read_manifest(root)
+          if (base is None or manifest is None
+                  or set(base['hydrated_profiles']) != set(state.PROFILE_NAMES)
+                  or base['generation'] != manifest['generation']):
+              raise SystemExit('Projection requires all profiles from the current published generation')
+          snapshot = state._transaction_snapshot_id(root)
+          if (not state._valid_snapshot_id(snapshot)
+                  or snapshot != base.get('transaction_snapshot_id')
+                  or snapshot != manifest['profiles']['transactions']['transaction_snapshot_id']):
+              raise SystemExit('Hydrated transaction snapshot does not match the published generation')
+          if any((root / 'data' / '_raw').glob('*.xls*')):
+              raise SystemExit('Aggregate-only projection refuses unmerged raw exports')
+          checkpoints = {}
+          for profile in state.PROFILE_NAMES:
+              for name, expected in manifest['profiles'][profile]['archive']['members'].items():
+                  path = root / name
+                  if (not path.is_file() or path.stat().st_size != expected['size']
+                          or state._sha256_path(path) != expected['sha256']):
+                      raise SystemExit('Hydrated checkpoint does not match the published generation')
+                  checkpoints[name] = expected
+          frozen = {'generation': base['generation'], 'transaction_snapshot_id': snapshot,
+                    'started_at': datetime.now(timezone.utc).isoformat(),
+                    'checkpoints': checkpoints}
+          Path(os.environ['PROJECTION_INPUTS_PATH']).write_text(json.dumps(frozen))
+          print(f"BALANCE_PROJECTION_INPUT generation={base['generation']} snapshot={snapshot}")
+          PY
+
+      - name: Re-aggregate from published evidence
+        # 19 minutes on its one run; the same aggregation takes up to 28
+        # elsewhere. The pooler hides a dead backend (2026-09-23), so a hang
+        # has to be ended here.
+        timeout-minutes: 60
+        run: python scraper/process.py
+
+      - name: Re-key donor aggregates onto resolved entities
+        # Keep the Donors tab consistent with the normal daily projection.
+        timeout-minutes: 15
+        run: python scraper/refresh_donor_aggregates.py
+
+      - name: Verify published balance projection
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from scripts import pipeline_state as state
+
+          root = Path.cwd()
+          sys.path.insert(0, str(root / 'scraper'))
+          import balance_snapshot as balances
+          import supabase_sync
+
+          frozen = json.loads(Path(os.environ['PROJECTION_INPUTS_PATH']).read_text())
+          manifest = state._read_manifest(root)
+          if (manifest is None or manifest['generation'] != frozen['generation']
+                  or manifest['profiles']['transactions']['transaction_snapshot_id']
+                  != frozen['transaction_snapshot_id']
+                  or state._transaction_snapshot_id(root) != frozen['transaction_snapshot_id']):
+              raise SystemExit('Published state or local ledger changed during projection')
+          for name, expected in frozen['checkpoints'].items():
+              path = root / name
+              if (not path.is_file() or path.stat().st_size != expected['size']
+                      or state._sha256_path(path) != expected['sha256']):
+                  raise SystemExit('Projection unexpectedly changed an input checkpoint')
+          receipt = json.loads((root / 'data/aggregated/balance_publication.json').read_text())
+          if receipt != supabase_sync.require_dashboard_cache('balance_publication'):
+              raise SystemExit('Publication receipt differs from this committed projection')
+          if not receipt.get('generation') or not receipt.get('detail_count'):
+              raise SystemExit('Missing publication generation or committee details')
+          source = json.loads((root / 'data/aggregated/balance_snapshot_source.json').read_text())
+          report = json.loads((root / 'data/aggregated/balance_discrepancies.json').read_text())
+          if (source != supabase_sync.require_dashboard_cache('balance_snapshot_source')
+                  or report != supabase_sync.require_dashboard_cache('balance_discrepancies')):
+              raise SystemExit('Published balance source/report differs from this projection')
+          if (source.get('version') != balances.FORMAT_VERSION
+                  or source.get('calculation_version') != balances.CALCULATION_VERSION
+                  or source.get('transaction_snapshot_id') != frozen['transaction_snapshot_id']
+                  or not isinstance(source.get('scopes'), dict)
+                  or report.get('schema_version') != 2
+                  or report.get('basis') != 'paired_capture_window_v1'):
+              raise SystemExit('Published balance source/report has an unexpected schema or snapshot')
+          def utc(value):
+              parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+              # process.py emits report.generated without an offset; TZ=UTC is set above.
+              return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+          if not (utc(frozen['started_at']) <= utc(source['created_at'])
+                  <= utc(report['generated']) <= datetime.now(timezone.utc)):
+              raise SystemExit('Balance source/report does not describe this completed projection')
+          for count, rows in (('flagged', 'rows'), ('refresh_needed', 'refresh_rows'),
+                              ('unpaired', 'unpaired_rows'), ('nonactionable', 'nonactionable_rows')):
+              if (type(report.get(count)) is not int or not isinstance(report.get(rows), list)
+                      or report[count] != len(report[rows])):
+                  raise SystemExit('Balance report counts do not match its evidence rows')
+          print('BALANCE_PROJECTION_RESULT ' + json.dumps({
+              'generation': frozen['generation'], 'publication_generation': receipt['generation'],
+              'transaction_snapshot_id': frozen['transaction_snapshot_id'],
+              'source_created_at': source['created_at'], 'report_generated': report['generated'],
+              'actionable': report['flagged'], 'refresh_needed': report['refresh_needed'],
+              'unpaired': report['unpaired'], 'nonactionable': report['nonactionable'],
+          }, sort_keys=True))
+          PY
+
+      # process.py writes dashboard_cache and filer_detail. Input checkpoints
+      # are checked unchanged above, so no raw pipeline profiles are republished.

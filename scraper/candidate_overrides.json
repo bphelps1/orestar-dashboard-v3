@@ -1,0 +1,24 @@
+{
+  "_README": [
+    "Manual candidate -> committee links for the Races map.",
+    "",
+    "Key:   \"<ballot name>|<office_district or office>\"  (case-insensitive)",
+    "Value: the committee's ORESTAR filer_id",
+    "",
+    "Consulted BEFORE any name matching, so it always wins. Use it only where",
+    "no matcher should be expected to guess -- a committee named nothing like",
+    "its candidate, or two plausible people in one district. Ordinary variants",
+    "are handled automatically:",
+    "  exact  -- names normalise identically",
+    "  subset -- one name's tokens contain the other's and surnames agree",
+    "            (maiden/hyphenated: 'Vikki K Iverson' ~ 'Vikki Breese-Iverson')",
+    "  fuzzy  -- token_sort_ratio >= 80 with an agreeing surname",
+    "",
+    "Candidates that still match nothing are printed by",
+    "refresh_legislative_map.py and listed in /admin, so they can be linked",
+    "here rather than sitting silently at $0.",
+    "",
+    "Example:",
+    "  \"Jane Doe|State Representative, 12th District\": \"12345\""
+  ]
+}

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Donor Lookup — Oregon Campaign Finance</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="lib/donor-names.js"></script>
+  <script src="lib/supabase.js"></script>
+  <style>
+    .dn-wrap { max-width: 1100px; margin: 0 auto; padding: 1rem; }
+    .dn-search-box { position: relative; max-width: 640px; }
+    .dn-search-box input {
+      width: 100%; padding: .7rem .9rem; font-size: 1rem;
+      border: 1px solid #ccc; border-radius: 8px;
+    }
+    .dn-results {
+      position: absolute; top: 100%; left: 0; right: 0; z-index: 20;
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(0,0,0,.08); max-height: 420px; overflow-y: auto;
+      list-style: none; margin: 4px 0 0; padding: 0;
+    }
+    .dn-results li { padding: .55rem .9rem; cursor: pointer; }
+    .dn-results li:hover, .dn-results li.selected { background: #ebf4ff; }
+    .dn-result-name { font-weight: 600; }
+    .dn-result-meta { font-size: .78rem; color: #718096; }
+    .dn-result-alias { font-size: .74rem; color: #2b6cb0; margin-top: 1px; }
+    .dn-hint { color: #718096; font-size: .85rem; margin-top: .5rem; }
+    .dn-profile { margin-top: 1.5rem; }
+    .dn-head h2 { margin: 0 0 .25rem; }
+    .dn-sub { color: #718096; font-size: .9rem; }
+    .dn-links { margin: .5rem 0 1rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+    .dn-links a { color: #2b6cb0; text-decoration: none; font-size: .9rem; }
+    .dn-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem; margin: 1rem 0; }
+    .dn-card { background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: .8rem; text-align: center; }
+    .dn-card-value { font-size: 1.25rem; font-weight: 700; }
+    .dn-card-label { font-size: .75rem; color: #718096; text-transform: uppercase; letter-spacing: .03em; }
+    .dn-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1rem; }
+    @media (max-width: 760px) { .dn-cols { grid-template-columns: 1fr; } }
+    .dn-section h3 { font-size: 1rem; margin: 0 0 .5rem; }
+    table.dn-table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    .dn-table th, .dn-table td { padding: .4rem .55rem; border-bottom: 1px solid #edf2f7; text-align: left; }
+    .dn-table td.num, .dn-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    #dn-chart { width: 100%; height: 260px; }
+    .dn-aliases { font-size: .82rem; color: #4a5568; line-height: 1.7; }
+    .dn-alias { background: #edf2f7; border-radius: 4px; padding: 1px 7px; margin-right: 5px; display: inline-block; }
+    .dn-pager { display: flex; gap: .5rem; align-items: center; margin: .6rem 0; }
+    .dn-btn { padding: .35rem .7rem; border: 1px solid #2b6cb0; background: #fff; color: #2b6cb0; border-radius: 6px; cursor: pointer; font-size: .82rem; }
+    .dn-btn:disabled { opacity: .45; cursor: default; }
+    .dn-error { color: #c53030; margin: 1rem 0; }
+    .dn-loading { color: #718096; margin: 1rem 0; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">Donor lookup · resolved entities across all name &amp; address variants, 2006–present</p>
+  </div>
+</header>
+
+<nav class="tab-nav" role="tablist">
+  <div class="tab-nav-inner">
+    <a class="tab-btn tab-link" href="/">← Dashboard</a>
+    <span class="tab-btn active">Donor Lookup</span>
+    <a class="tab-btn tab-link" href="/explore">Explore</a>
+    <span class="tab-sep" aria-hidden="true"></span>
+    <a class="tab-btn tab-link tab-login" id="login-tab" href="/login">Login</a>
+  </div>
+</nav>
+
+<main class="dn-wrap">
+  <div class="dn-search-box">
+    <input type="search" id="dn-search" placeholder="Search donors — e.g. Phil Knight, SEIU, Nike…" autocomplete="off" />
+    <ul class="dn-results" id="dn-results" hidden></ul>
+  </div>
+  <p class="dn-hint">Donors are resolved entities: one profile covers every spelling and address
+    variant. Committee donors link to their committee page.</p>
+
+  <div class="dn-error" id="dn-error" hidden></div>
+  <div class="dn-loading" id="dn-loading" hidden>Loading profile…</div>
+
+  <div class="dn-profile" id="dn-profile" hidden>
+    <div class="dn-head">
+      <h2 id="dn-name"></h2>
+      <div class="dn-sub" id="dn-meta"></div>
+      <div class="dn-links" id="dn-links"></div>
+    </div>
+
+    <div class="dn-cards">
+      <div class="dn-card"><div class="dn-card-value" id="dn-given">—</div><div class="dn-card-label">Total given</div></div>
+      <div class="dn-card"><div class="dn-card-value" id="dn-received">—</div><div class="dn-card-label">Total received (as payee)</div></div>
+      <div class="dn-card"><div class="dn-card-value" id="dn-gifts">—</div><div class="dn-card-label">Contributions</div></div>
+      <div class="dn-card"><div class="dn-card-value" id="dn-span">—</div><div class="dn-card-label">Active span</div></div>
+    </div>
+
+    <div class="dn-section">
+      <h3>Giving by year</h3>
+      <div id="dn-chart"></div>
+    </div>
+
+    <div class="dn-section">
+      <h3>Top recipients</h3>
+      <table class="dn-table" id="dn-recipients">
+        <thead><tr><th>Committee</th><th class="num">Gifts</th><th class="num">Total</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="dn-section" style="margin-top:1.5rem">
+      <h3>Transactions</h3>
+      <table class="dn-table" id="dn-txns">
+        <thead><tr><th>Date</th><th>Type</th><th class="num">Amount</th><th>Committee</th><th>Purpose</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="dn-pager">
+        <button class="dn-btn" id="dn-prev" disabled>‹ Prev</button>
+        <span id="dn-page">—</span>
+        <button class="dn-btn" id="dn-next" disabled>Next ›</button>
+      </div>
+    </div>
+
+    <!-- Aliases last: useful for confirming an identity, but not what the
+         page is primarily about. -->
+    <div class="dn-section" style="margin-top:1.5rem">
+      <h3>Also appears as</h3>
+      <div class="dn-aliases" id="dn-aliases"></div>
+    </div>
+  </div>
+</main>
+
+<script src="donors.js"></script>
+</body>
+</html>

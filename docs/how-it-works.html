@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>How Recommend Works — Oregon Campaign Finance</title>
+  <!-- Served at /recommend/how-it-works, so every path here is absolute. -->
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/recommend.css" />
+  <link rel="stylesheet" href="/how-it-works.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">
+      Donor recommendations &middot; how it works
+    </p>
+  </div>
+</header>
+
+<nav class="tab-nav tools-nav" aria-label="Campaign tools">
+  <div class="tab-nav-inner">
+    <a class="tab-btn tab-link" href="/">← Dashboard</a>
+    <a class="tab-btn active" href="/recommend">Recommend</a>
+    <a class="tab-btn" href="/admin/lobbyists" data-needs-admin hidden>Lobbyists</a>
+    <a class="tab-btn" href="/admin/donors" data-needs-admin hidden>Donor admin</a>
+    <span class="tab-sep tools-account" aria-hidden="true" hidden></span>
+    <span class="tools-account" hidden>
+      <span class="tools-user" id="user-info"></span>
+      <button type="button" class="btn-small" id="sign-out-btn">Sign Out</button>
+    </span>
+  </div>
+</nav>
+
+<main id="app-content" class="hiw-wrap" hidden>
+  <aside class="hiw-toc">
+    <details id="hiw-toc-details">
+      <summary>Contents</summary>
+      <nav id="hiw-toc" aria-label="Contents"></nav>
+    </details>
+  </aside>
+
+  <article class="hiw-doc" id="hiw-doc">
+    <p class="loading-msg">Loading…</p>
+  </article>
+</main>
+
+<footer>
+  <p>Oregon Campaign Finance &mdash; Donor Recommendation Tool</p>
+</footer>
+
+<script src="/lib/supabase.js"></script>
+<script src="/how-it-works.js"></script>
+</body>
+</html>

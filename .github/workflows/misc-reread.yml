@@ -1,0 +1,157 @@
+name: Lumped-Row Re-read (history)
+
+# Re-reads every lumped "Miscellaneous ... $100 and under" row ORESTAR holds,
+# 2006 to today, in quarter-year filed-date windows. ORESTAR edits these rows
+# in place (same Tran ID, same filed date, new amount), so our copies can be
+# stale however long ago they were fetched. The merge keeps the newest copy of
+# each ID and records every re-priced row in data/amount_updates.json, which is
+# the population-wide amount check. The daily refresh re-reads the last eight
+# weeks on its own; this workflow is for the whole history, and chains itself
+# until every window is done.
+#
+# Must run HEADED under xvfb: ORESTAR's F5 bot defense blocks headless Chromium.
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_year:
+        description: "First filed year to re-read"
+        required: false
+        default: "2006"
+        type: string
+      chain_index:
+        description: "Internal: which run of the retrigger chain this is"
+        required: false
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+  actions: write          # retrigger itself, or requeue instead of overlapping
+
+concurrency:
+  # A requeued run needs its own pending slot; await-orestar serializes the
+  # whole workflow before site access and pipeline_state.py handles publication.
+  group: misc-reread-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  reread:
+    runs-on: ubuntu-latest
+    # 25m coordination wait + up to 25m browser install + a fetch that stops
+    # itself at its 150-minute budget (or on rate-limiting), then merge and
+    # publication. The job timeout is only a backstop: a job killed by it never
+    # merges or publishes the windows it read.
+    timeout-minutes: 300
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Never let two ORESTAR scrapers run at once — see
+      # .github/actions/await-orestar for why this is a runtime check rather
+      # than a concurrency group or a schedule gap.
+      - name: Wait for other ORESTAR jobs
+        id: orestar_wait
+        continue-on-error: true
+        uses: ./.github/actions/await-orestar
+        with:
+          max-wait-minutes: "25"
+          fail-on-timeout: "true"
+
+      - name: Requeue after coordination timeout
+        if: steps.orestar_wait.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/dispatch_retry.sh misc-reread.yml --ref "${{ github.ref_name }}" \
+            -f start_year="${{ inputs.start_year }}" \
+            -f chain_index="${{ inputs.chain_index }}"
+
+      - name: Refuse uncoordinated lumped-row re-read
+        if: steps.orestar_wait.outcome == 'failure'
+        run: |
+          echo "::error::ORESTAR remained busy; queued a replacement re-read instead of overlapping it."
+          exit 1
+
+      - name: Refresh branch after coordination wait
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Hydrate pipeline state
+        run: python scripts/pipeline_state.py pull transactions summaries auxiliary
+
+      - name: Install Playwright chromium + system dependencies
+        # Bounded and retried: a hung install held the ORESTAR lane for 3 hours
+        # against the job's 300-minute timeout. 18 minutes is the backstop for
+        # the script's own 3 x 300s cap.
+        timeout-minutes: 25
+        run: bash scripts/install_playwright.sh
+
+      - name: Install Xvfb (headed browser required — headless is blocked)
+        run: sudo apt-get install -y xvfb
+
+      - name: Count windows before
+        id: before
+        run: echo "remaining=$(python scraper/fetch.py --mode=count-misc-remaining --start-year=${{ inputs.start_year }})" >> "$GITHUB_OUTPUT"
+
+      - name: Re-read lumped Miscellaneous rows
+        # A failure part-way still leaves every finished window on disk and in
+        # the progress log, so merge and publish them; the re-trigger step stops
+        # the chain if the run finished none.
+        continue-on-error: true
+        run: xvfb-run --auto-servernum python scraper/fetch.py --mode=misc-reread --start-year=${{ inputs.start_year }} --max-minutes=150
+
+      - name: Merge re-read rows (records re-priced amounts)
+        id: merge
+        # 1.6-2.8 minutes over 24 runs. The merge writes Postgres, and the
+        # pooler hides a dead backend (2026-09-23), so a hang ends here.
+        timeout-minutes: 20
+        run: python scraper/process.py --merge-only
+
+      - name: Publish re-read state
+        if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
+        run: python scripts/pipeline_state.py push transactions auxiliary
+
+      - name: Re-trigger if windows remain
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BEFORE="${{ steps.before.outputs.remaining }}"
+          AFTER=$(python scraper/fetch.py --mode=count-misc-remaining --start-year=${{ inputs.start_year }})
+          CHAIN="${{ inputs.chain_index }}"
+          echo "Windows remaining: $BEFORE -> $AFTER (chain run $CHAIN)"
+          if [ "$AFTER" -le 0 ] 2>/dev/null; then
+            echo "History-wide re-read complete."
+            exit 0
+          fi
+          if [ "$AFTER" -ge "$BEFORE" ] 2>/dev/null; then
+            echo "This run completed no windows — stopping rather than looping. Re-run later to continue."
+            exit 0
+          fi
+          if [ "$CHAIN" -ge 60 ] 2>/dev/null; then
+            echo "Chain limit reached with $AFTER windows remaining; re-run to continue."
+            exit 0
+          fi
+          bash scripts/dispatch_retry.sh misc-reread.yml --ref "${{ github.ref_name }}" \
+            -f start_year="${{ inputs.start_year }}" \
+            -f chain_index="$((CHAIN + 1))"

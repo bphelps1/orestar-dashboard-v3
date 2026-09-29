@@ -1,0 +1,21 @@
+{
+  "_comment": "Manual name correction overrides. Format: { 'raw name variant': 'canonical name' }. These take precedence over fuzzy matching.",
+  "NIKE INC": "Nike Inc",
+  "Nike Inc.": "Nike Inc",
+  "NIKE, INC": "Nike Inc",
+  "Nike": "Nike Inc",
+  "Nike Inc. and Affiliates": "Nike Inc",
+  "Oregon Education Assn": "Oregon Education Association",
+  "OEA-PAC (142)": "Oregon Education Association",
+  "OR Education Assn": "Oregon Education Association",
+  "SEIU Local 503": "SEIU Local 503",
+  "Service Employees Intl Union Local 503": "SEIU Local 503",
+  "SEIU Local 503 OPEU": "SEIU Local 503",
+  "Philip Knight": "Phil Knight",
+  "Philip H Knight": "Phil Knight",
+  "UFCW Local 55": "UFCW Local 555",
+  "United Food and Commercial Workers Union Local 555 Political": "UFCW Local 555",
+  "Service Employees International Union": "SEIU Local 503",
+  "Oregon Association of Realtors": "Oregon Realtors Political Action Committee (191)",
+  "Associated General Contractors (AGC) Columbia Chapter": "AGC Committee for Action (4)"
+}

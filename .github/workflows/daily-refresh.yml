@@ -1,0 +1,128 @@
+name: Daily Data Refresh
+
+on:
+  schedule:
+    # 15:00 UTC = 8:00 AM PST (UTC-7 in summer / UTC-8 in winter)
+    - cron: "0 15 * * *"
+  workflow_dispatch:  # allow manual trigger from GitHub UI
+
+permissions:
+  contents: read
+  actions: write          # requeue instead of overlapping after a busy timeout
+
+concurrency:
+  group: data-pipeline
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.event_name == 'workflow_dispatch' || vars.PIPELINE_SCHEDULES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    # Includes a possible 45-minute exclusive-access wait plus browser install,
+    # collection, aggregation, and final state publication.
+    timeout-minutes: 180
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Never let two ORESTAR scrapers run at once — see
+      # .github/actions/await-orestar for why this is a runtime check rather
+      # than a concurrency group or a schedule gap.
+      - name: Wait for other ORESTAR jobs
+        id: orestar_wait
+        continue-on-error: true
+        uses: ./.github/actions/await-orestar
+        with:
+          fail-on-timeout: "true"
+
+      - name: Requeue after coordination timeout
+        if: steps.orestar_wait.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/dispatch_retry.sh daily-refresh.yml --ref "${{ github.ref_name }}"
+
+      - name: Refuse uncoordinated refresh
+        if: steps.orestar_wait.outcome == 'failure'
+        run: |
+          echo "::error::ORESTAR remained busy; queued a replacement daily refresh instead of overlapping it."
+          exit 1
+
+      - name: Refresh branch after coordination wait
+        # Checkout happens before the local wait action can run. Another
+        # scraper may publish transactions or summary metadata while this job
+        # waits, so pair this run's collection work with the latest snapshot.
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Hydrate pipeline state
+        run: python scripts/pipeline_state.py pull transactions summaries auxiliary
+
+      - name: Install Playwright browser + system dependencies
+        # Bounded and retried: a hung install held the ORESTAR lane for 3 hours
+        # against the job's 300-minute timeout. 18 minutes is the backstop for
+        # the script's own 3 x 300s cap.
+        timeout-minutes: 25
+        run: bash scripts/install_playwright.sh
+
+      - name: Install Xvfb (virtual display for headed browser)
+        run: sudo apt-get install -y xvfb
+
+      - name: Check for split-window gaps and repair
+        run: python scraper/fetch.py --mode=check-gaps
+
+      - name: Fetch last 14 days from ORESTAR
+        run: xvfb-run --auto-servernum python scraper/fetch.py --mode=incremental --days=14
+
+      # ORESTAR edits lumped "Miscellaneous ... $100 and under" rows in place,
+      # keeping their Tran ID and filed date, and a filed-date window is never
+      # fetched twice. Re-read the last eight weeks of those rows (about ten
+      # searches) so edits reach the merge, which keeps the newest copy. Not
+      # worth failing the refresh over: tomorrow's run re-reads the same span.
+      - name: Re-read recent lumped Miscellaneous rows
+        continue-on-error: true
+        run: xvfb-run --auto-servernum python scraper/fetch.py --mode=misc-recent --days=56
+
+      - name: Process and aggregate data (also syncs to Supabase)
+        # 19-37 minutes over 18 runs (2026-09-08..22). A backend that dies
+        # under the pooler never errors, so this is what ends the step.
+        timeout-minutes: 75
+        run: python scraper/process.py
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: exports
+
+      - name: Re-key donor aggregates onto resolved entities
+        # process.py rebuilds these blobs from raw names; re-key them so the
+        # Donors tab keeps showing merged entities between weekly resolves.
+        # Normally ~2.5 minutes (max 3.6 over 18 runs).
+        timeout-minutes: 15
+        run: python scraper/refresh_donor_aggregates.py
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: exports
+
+      - name: Publish pipeline state
+        run: python scripts/pipeline_state.py push transactions auxiliary

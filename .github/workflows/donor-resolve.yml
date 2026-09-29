@@ -1,0 +1,72 @@
+name: Donor Entity Resolution (weekly)
+
+# Rebuilds the master donors/donor_aliases tables from scratch and restamps
+# transactions.donor_id, applying admin review decisions as must/cannot-link
+# constraints. Runs on CI's clean network (bulk writes fail on flaky links).
+# The daily refresh only does fast incremental alias assignment between runs.
+
+on:
+  schedule:
+    # Sundays 12:00 UTC — after the filer-metadata refresh (08:00) so the
+    # committee namespace is current.
+    - cron: "0 12 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: data-pipeline
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: github.event_name == 'workflow_dispatch' || vars.PIPELINE_SCHEDULES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_COPY_CHUNK: "50000"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Apply migrations (idempotent)
+        run: python scraper/db_admin.py apply
+
+      # Step timeouts: SUPABASE_DB_URL goes through the Supavisor pooler, which
+      # kept the client socket open when Postgres crashed on 2026-09-23, so the
+      # re-key sat silent for 1h44m until cancelled by hand. Keepalives and
+      # statement_timeout cannot see that (see supabase_sync._connect).
+      - name: Run full donor resolution
+        # 8.8, 12.0 and 17.0 minutes on the last three Sundays: it is growing.
+        timeout-minutes: 60
+        run: python scraper/resolve_donors.py --full
+
+      - name: Rebuild donor aggregates by resolved entity
+        # Must follow the resolve: the Donors tab blobs are keyed by donor_id,
+        # so they are stale until the entities are rebuilt. ~2.2 minutes.
+        timeout-minutes: 15
+        run: python scraper/refresh_donor_aggregates.py
+
+      # No pipeline-state publication here on purpose. resolve_donors.py upserts the
+      # review queue to dashboard_cache('donor_review_queue'), which is what the
+      # admin page reads, so persisting data/review_queue.json separately would
+      # be pure duplication.
+      - name: Confirm results landed
+        run: python scraper/db_admin.py verify

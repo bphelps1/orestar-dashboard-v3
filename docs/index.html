@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Oregon Campaign Finance</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- ECharts -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <!-- Fuse.js for client-side fuzzy search -->
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
+  <!-- Supabase (for role-based admin access check) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="lib/donor-names.js"></script>
+  <script src="lib/supabase.js"></script>
+  <script src="lib/identity.js"></script>
+<script src="lib/data.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">
+      Public ORESTAR data · Updated daily · 2006–present
+    </p>
+  </div>
+</header>
+
+<div class="filter-toolbar" id="filter-toolbar">
+  <div class="filter-inner">
+    <div class="filter-toggle-mobile" id="filter-toggle-mobile">
+      <button class="filter-toggle-btn" id="filter-toggle-btn" aria-expanded="false">
+        <span class="filter-toggle-label">Filters</span>
+        <span class="filter-toggle-icon">▾</span>
+      </button>
+    </div>
+    <div class="filter-fields" id="filter-fields">
+      <div class="filer-selector">
+        <div class="filer-combobox" id="filer-combobox" role="combobox" aria-expanded="false">
+          <div class="chip-input-row" id="chip-input-row">
+            <input type="text" id="filer-search-input" class="filer-search-input"
+              placeholder="Search committees…" autocomplete="off"
+              aria-label="Search committees"
+              aria-autocomplete="list" aria-controls="filer-dropdown" />
+          </div>
+          <ul class="filer-dropdown" id="filer-dropdown" role="listbox" hidden></ul>
+        </div>
+      </div>
+      <div class="date-range-group">
+        <input type="date" id="date-start" aria-label="Start date" />
+        <span class="date-sep">–</span>
+        <input type="date" id="date-end" aria-label="End date" />
+        <button class="filter-apply-btn" id="filter-apply-btn">Apply</button>
+      </div>
+      <div class="cycle-presets" id="cycle-presets" aria-label="Election cycle presets">
+        <span class="cycle-presets-label">Cycle:</span>
+        <!-- Filled by app.js so the years advance on their own -->
+      </div>
+      <button class="filter-clear-btn" id="filter-clear-btn" hidden>Clear</button>
+    </div>
+  </div>
+</div>
+
+<nav class="tab-nav" role="tablist">
+  <div class="tab-nav-inner">
+    <button class="tab-btn active" data-tab="overview"    role="tab" aria-selected="true">Overview</button>
+    <button class="tab-btn"        data-tab="donors"      role="tab">Donors</button>
+    <button class="tab-btn"        data-tab="recipients"  role="tab">Recipients</button>
+    <a class="tab-btn tab-link" href="/explore">Explore</a>
+    <a class="tab-btn tab-link" href="/donors">Donor Lookup</a>
+    <span class="tab-sep" aria-hidden="true"></span>
+    <a class="tab-btn tab-link tab-login" id="login-tab" href="/login">Login</a>
+  </div>
+</nav>
+
+<main>
+
+  <!-- ══════════════════════════ OVERVIEW ══════════════════════════ -->
+  <section id="tab-overview" class="tab-panel active">
+    <!-- Who/what is being filtered: candidate, office sought, race field -->
+    <div id="filer-race-header" class="filer-race-header" hidden></div>
+
+    <!-- Per-filer stat cards (multi-filer mode) -->
+    <div id="filer-comparison-grid" class="filer-comparison-grid" hidden></div>
+
+    <!-- Headline stats — 3 primary metrics only -->
+    <div class="stat-cards" id="stat-cards">
+      <div class="card">
+        <div class="card-value" id="stat-contributions">—</div>
+        <div class="card-label">Contributions <span class="card-help" tabindex="0" role="button" aria-label="Info">?<span class="card-help-tip"><strong>Counted:</strong> Cash contributions only. In-kind is tracked separately and is never folded in.<br><strong>Note:</strong> ORESTAR's own "Cash Contributions" line does include in-kind, so this figure is lower than theirs by the in-kind total.</span></span></div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="stat-expenditures">—</div>
+        <div class="card-label">Expenditures <span class="card-help" tabindex="0" role="button" aria-label="Info">?<span class="card-help-tip"><strong>Counted:</strong> Cash expenditures only, mirroring the cash-only contribution rule.<br><strong>Excludes:</strong> In-kind, agent expenditures, accounts payable, and personal expenditure reimbursements.</span></span></div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="stat-cash-on-hand">—</div>
+        <div class="card-label">Cash on Hand <span id="coh-indicator" class="coh-indicator" title="" hidden></span> <span class="card-help" tabindex="0" role="button" aria-label="Info">?<span class="card-help-tip"><strong>Calculated from:</strong> Beginning balance + cash contributions + other receipts &minus; cash expenditures &minus; other disbursements, summed across all recorded transactions.<br><strong>Beginning balance:</strong> For committees that pre-date ORESTAR (before 2006), the beginning balance is their "Beginning Balance (Previous Year)" from the earliest year on record. Committees created in 2006 or later start at $0 since all their transactions are captured.<br><strong>Meaning:</strong> How much liquid cash a committee currently holds, calculated entirely from transaction-level data. If a warning icon appears, it shows the difference between this calculation and the official ORESTAR ending cash balance.<span id="coh-statewide-note"></span></span></span></div>
+      </div>
+    </div>
+    <!-- Hidden elements for JS compatibility (In-Kind + Transactions still written by JS) -->
+    <span id="stat-inkind" hidden></span>
+    <span id="stat-transactions" hidden></span>
+
+    <!-- ── Fundraising Pulse ─────────────────────────────────────────── -->
+    <div class="campaign-pulse" id="campaign-pulse" hidden>
+      <div class="pulse-header">
+        <h2>Who's Fundraising?</h2>
+        <div class="pulse-period-toggle" id="pulse-period-toggle">
+          <button class="toggle-btn active" data-period="30d">30 Days</button>
+          <button class="toggle-btn" data-period="90d">90 Days</button>
+          <button class="toggle-btn" data-period="cycle">This Cycle</button>
+        </div>
+      </div>
+      <div class="pulse-lanes" id="pulse-lanes">
+        <div class="pulse-lane" id="pulse-lane-raising">
+          <h3 class="pulse-lane-title">Raising the Most</h3>
+          <div class="pulse-lane-body" id="pulse-raising-body"></div>
+        </div>
+        <div class="pulse-lane" id="pulse-lane-momentum">
+          <h3 class="pulse-lane-title">Building Momentum</h3>
+          <div class="pulse-lane-body" id="pulse-momentum-body"></div>
+        </div>
+        <div class="pulse-lane" id="pulse-lane-donors">
+          <h3 class="pulse-lane-title">Biggest Donors</h3>
+          <div class="pulse-lane-body" id="pulse-donors-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Races to Watch ─────────────────────────────────────────────── -->
+    <div class="chart-area chart-area-wide rc-box" id="legislative-races-box">
+      <div class="cmp-head">
+        <h2>Legislative races</h2>
+        <div class="cmp-controls">
+          <div class="cmp-toggle" id="rc-chamber">
+            <button data-chamber="house" class="active">House</button>
+            <button data-chamber="senate">Senate</button>
+          </div>
+        </div>
+      </div>
+      <p class="cmp-note" id="rc-note">Districts shaded by total raised this cycle. Click one for its candidates.</p>
+      <div class="rc-layout">
+        <div id="rc-map"></div>
+        <aside class="rc-panel" id="rc-panel">
+          <h3 id="rc-panel-title">Select a district</h3>
+          <div class="rc-total" id="rc-panel-total"></div>
+          <div id="rc-panel-body" class="rc-empty">Click any district on the map.</div>
+        </aside>
+      </div>
+    </div>
+
+    <div class="races-to-watch" id="races-to-watch" hidden>
+      <h2>Races to Watch</h2>
+      <div class="races-list" id="races-list"></div>
+    </div>
+
+    <!-- Collapsible Account Summary Details -->
+    <div class="chart-area chart-area-wide cmp-box" id="past-cycles-box">
+      <div class="cmp-head">
+        <h2>Compared with past cycles</h2>
+        <div class="cmp-controls">
+          <div class="cmp-toggle" id="cmp-set">
+            <button data-set="governor" class="active">Governor</button>
+            <button data-set="leadership">Leadership</button>
+            <button data-set="caucus">Caucus PACs</button>
+          </div>
+          <div class="cmp-toggle" id="cmp-mode">
+            <button data-mode="nominal" class="active">Nominal $</button>
+            <button data-mode="real">Real $</button>
+          </div>
+        </div>
+      </div>
+      <p class="cmp-note" id="cmp-note">Nominal dollars as reported</p>
+      <div id="cmp-chart" class="echart-container"></div>
+    </div>
+
+    <!-- ── Legislative race map (moved here from the retired /races page) ── -->
+    <details class="acct-summary-details" id="acct-summary-details">
+      <summary class="acct-summary-toggle">Account Summary Details</summary>
+      <div class="acct-summary-controls" id="acct-summary-controls" hidden>
+        <label for="acct-year-select">Year:</label>
+        <select id="acct-year-select"><option value="">All Time</option></select>
+      </div>
+      <div class="acct-summary-grid" id="acct-summary-grid"></div>
+    </details>
+
+    <div class="overview-charts">
+      <div class="chart-area" id="overview-donut-box">
+        <h2 id="overview-donut-title">Contributions by Donor Type</h2>
+        <div id="chart-contributor-type" class="echart-container"></div>
+        <div id="cc-donortype-chart" class="echart-container" hidden></div>
+      </div>
+
+      <!-- ── Party Fundraising ──────────────────────────────────────────── -->
+      <div class="chart-area" id="party-fundraising-box" hidden>
+        <div class="chart-header">
+          <h2>Who Funds Oregon's Parties</h2>
+        </div>
+        <div id="chart-party-fundraising" class="echart-container"></div>
+        <div id="cc-party-chart" class="echart-container" hidden></div>
+      </div>
+
+      <div class="chart-area chart-area-wide" id="overview-timeline-box">
+        <h2>Monthly Cash Flow</h2>
+        <div id="chart-timeline" class="echart-container"></div>
+        <div id="cc-cash-chart" class="echart-container" hidden></div>
+      </div>
+    </div>
+
+    <!-- ── Historical comparison ──────────────────────────────────────── -->
+    <p class="last-updated">Data through <span id="last-updated">—</span></p>
+  </section>
+
+  <!-- ══════════════════════════ DONORS ══════════════════════════ -->
+  <section id="tab-donors" class="tab-panel" hidden>
+    <div id="donors-global-view">
+      <div class="section-toolbar">
+        <span id="donor-year-group" class="toolbar-control">
+          <label for="donor-year">Year:</label>
+          <select id="donor-year"><option value="all">All time</option></select>
+        </span>
+        <div class="view-toggle" id="donors-view-toggle">
+          <button class="toggle-btn active" data-view="summary">Summary</button>
+          <button class="toggle-btn" data-view="by-year">By Year</button>
+        </div>
+      </div>
+
+      <div class="table-wrapper integrated-module" id="donors-summary-table">
+        <div class="module-chart" id="donors-chart-box">
+          <div id="chart-top-donors" class="echart-container-tall"></div>
+        </div>
+        <div class="table-header">
+          <h2>All Donors</h2>
+          <input type="search" id="donors-summary-search" class="table-search" placeholder="Search donors…" />
+        </div>
+        <table id="table-donors" class="data-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th class="sortable" data-col="name">Donor</th>
+              <th class="sortable" data-col="total">Total ($)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div id="donors-by-year-view" hidden>
+        <div class="table-wrapper">
+          <h2>Donor Contributions by Year</h2>
+          <input type="search" id="donors-by-year-search" class="table-search" placeholder="Search donors…" />
+          <div class="by-year-scroll">
+            <table id="table-donors-by-year" class="data-table">
+              <thead id="donors-by-year-thead"></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="donors-multi-view" hidden>
+      <div class="table-wrapper">
+        <h2 id="donors-multi-title">Donor Comparison</h2>
+        <input type="search" id="donors-multi-search" class="table-search" placeholder="Search donors…" />
+        <table id="table-donors-multi" class="data-table">
+          <thead id="donors-multi-thead"></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ══════════════════════════ RECIPIENTS ══════════════════════════ -->
+  <section id="tab-recipients" class="tab-panel" hidden>
+    <div class="section-toolbar">
+      <span id="recipient-year-group" class="toolbar-control">
+        <label for="recipient-year">Year:</label>
+        <select id="recipient-year"><option value="all">All time</option></select>
+      </span>
+    </div>
+
+    <div class="table-wrapper integrated-module">
+      <div class="module-chart">
+        <h2 id="recipients-chart-title">Where the Money Goes</h2>
+        <div id="chart-top-recipients" class="echart-container-tall"></div>
+      </div>
+      <div class="table-header">
+        <h2 id="recipients-table-title">All Recipients</h2>
+      </div>
+      <table id="table-recipients" class="data-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th class="sortable" data-col="name">Committee / Candidate</th>
+            <th class="sortable" data-col="total">Total Received ($)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+
+</main>
+
+<footer>
+  <p>
+    Source: <a href="https://secure.sos.state.or.us/orestar/" target="_blank" rel="noopener">Oregon Secretary of State — ORESTAR</a>
+  </p>
+</footer>
+
+<script src="compare.js"></script>
+<script src="racemap.js"></script>
+<script src="cyclecompare.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

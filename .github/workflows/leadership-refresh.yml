@@ -1,0 +1,42 @@
+name: Monthly Leadership Refresh
+
+on:
+  schedule:
+    # First day of each month at 16:00 UTC
+    - cron: "0 16 1 * *"
+  workflow_dispatch:  # allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    if: github.event_name == 'workflow_dispatch' || vars.PIPELINE_SCHEDULES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install requests beautifulsoup4 lxml supabase
+
+      - name: Refresh leadership roles
+        run: python scraper/refresh_leadership.py
+
+      - name: Log result
+        run: echo "Leadership refresh completed at $(date -u)"

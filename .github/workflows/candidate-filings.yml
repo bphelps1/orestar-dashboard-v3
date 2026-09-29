@@ -1,0 +1,106 @@
+name: Candidate Filings (weekly)
+
+# Scrapes ORESTAR's Candidate Filing Search for the legislative ballot roster,
+# then rebuilds the Races map from it. Committees self-report "Election/Office"
+# inconsistently, so the filing record — not the committee — decides who appears
+# in a race. Auto-advances primary -> general as nominations post.
+#
+# Must run HEADED under xvfb: ORESTAR's F5 bot defense blocks headless Chromium.
+
+on:
+  schedule:
+    - cron: "30 13 * * 1"     # Mondays 06:30 PT
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write          # requeue instead of overlapping after a busy timeout
+
+concurrency:
+  # A requeued run needs its own pending slot; await-orestar serializes the
+  # whole workflow before site access and pipeline_state.py handles publication.
+  group: candidate-filings-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  filings:
+    if: github.event_name == 'workflow_dispatch' || vars.PIPELINE_SCHEDULES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    # 25m coordination wait + up to 25m browser install, with enough room for
+    # setup, the short filings scrape, map rebuild, and a retry dispatch.
+    timeout-minutes: 90
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Never let two ORESTAR scrapers run at once — see
+      # .github/actions/await-orestar for why this is a runtime check rather
+      # than a concurrency group or a schedule gap.
+      - name: Wait for other ORESTAR jobs
+        id: orestar_wait
+        continue-on-error: true
+        uses: ./.github/actions/await-orestar
+        with:
+          # The work itself is short; bound queueing so a replacement can be
+          # dispatched well inside the job's 90-minute budget.
+          max-wait-minutes: "25"
+          fail-on-timeout: "true"
+
+      - name: Requeue after coordination timeout
+        if: steps.orestar_wait.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/dispatch_retry.sh candidate-filings.yml --ref "${{ github.ref_name }}"
+
+      - name: Refuse uncoordinated candidate scrape
+        if: steps.orestar_wait.outcome == 'failure'
+        run: |
+          echo "::error::ORESTAR remained busy; queued a replacement filings scrape instead of overlapping it."
+          exit 1
+
+      - name: Refresh branch after coordination wait
+        # The map rebuild consumes current repository data after scraping; do
+        # not combine fresh filings with the checkout from before this wait.
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Hydrate candidate state
+        run: python scripts/pipeline_state.py pull auxiliary
+
+      - name: Install Playwright chromium + system dependencies
+        # Bounded and retried: a hung install held the ORESTAR lane for 3 hours
+        # against the job's 300-minute timeout. 18 minutes is the backstop for
+        # the script's own 3 x 300s cap.
+        timeout-minutes: 25
+        run: bash scripts/install_playwright.sh
+
+      - name: Install Xvfb (headed browser required — headless is blocked)
+        run: sudo apt-get install -y xvfb
+
+      - name: Scrape candidate filings
+        run: xvfb-run --auto-servernum python scraper/fetch_candidates.py
+
+      - name: Rebuild Races map from the roster
+        run: python scraper/refresh_legislative_map.py
+
+      - name: Publish candidate state
+        run: python scripts/pipeline_state.py push auxiliary

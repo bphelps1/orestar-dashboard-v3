@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Donor Recommendations — Oregon Campaign Finance</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="recommend.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
+  <!-- SheetJS for Excel export -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <!-- The Google Sheets mark, drawn once and reused by the export buttons. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="icon-sheets" viewBox="0 0 24 32">
+      <path d="M15 0H3a3 3 0 0 0-3 3v26a3 3 0 0 0 3 3h18a3 3 0 0 0 3-3V9z" fill="#0F9D58"/>
+      <path d="M15 0v6a3 3 0 0 0 3 3h6z" fill="#87CEAC"/>
+      <path d="M5 14h14v11H5z" fill="#fff"/>
+      <path d="M11 14h1.6v11H11zM5 17.4h14V19H5zM5 21.2h14v1.6H5z" fill="#0F9D58"/>
+    </symbol>
+  </svg>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">
+      Donor recommendations &middot; <a href="/recommend/how-it-works">How this works</a>
+    </p>
+  </div>
+</header>
+
+<nav class="tab-nav tools-nav" aria-label="Campaign tools">
+  <div class="tab-nav-inner">
+    <a class="tab-btn tab-link" href="/">← Dashboard</a>
+    <a class="tab-btn active" href="/recommend" aria-current="page">Recommend</a>
+    <a class="tab-btn" href="/admin/lobbyists" data-needs-admin hidden>Lobbyists</a>
+    <a class="tab-btn" href="/admin/donors" data-needs-admin hidden>Donor admin</a>
+    <span class="tab-sep tools-account" aria-hidden="true" hidden></span>
+    <span class="tools-account" hidden>
+      <span class="tools-user" id="user-info"></span>
+      <button type="button" class="btn-small" id="sign-out-btn">Sign Out</button>
+    </span>
+  </div>
+</nav>
+
+<main id="app-content" hidden>
+  <p class="loading-msg">Loading…</p>
+</main>
+
+<footer>
+  <p>Oregon Campaign Finance &mdash; Donor Recommendation Tool</p>
+</footer>
+
+<script src="lib/donor-names.js"></script>
+  <script src="lib/supabase.js"></script>
+<script src="lib/identity.js"></script>
+<script src="lib/data.js"></script>
+<script>
+// The tool itself is not in the public site; it loads once someone signs in.
+document.addEventListener("DOMContentLoaded", async () => {
+  if (!(await requireAuth())) return;
+  if (await loadPrivatePage({ markup: "recommend.html", styles: ["recommend.css"],
+                              scripts: ["lib/lobbyists.js", "lib/lobbyist-photos.js", "recommend.js"] })) {
+    await initApp();
+  }
+});
+</script>
+</body>
+</html>

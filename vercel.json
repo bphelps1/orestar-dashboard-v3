@@ -1,0 +1,48 @@
+{
+  "outputDirectory": "docs",
+  "ignoreCommand": "if [ -n \"$VERCEL_GIT_PREVIOUS_SHA\" ] && git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" HEAD -- docs/ api/ vercel.json .vercelignore; then exit 0; fi; exit 1",
+  "redirects": [
+    { "source": "/(.*)\\.md", "destination": "/", "permanent": false }
+  ],
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/:path*" },
+    { "source": "/recommend", "destination": "/recommend.html" },
+    { "source": "/recommend/how-it-works", "destination": "/how-it-works.html" },
+    { "source": "/explore", "destination": "/explore.html" },
+    { "source": "/donors", "destination": "/donors.html" },
+    { "source": "/login", "destination": "/login.html" },
+    { "source": "/admin/:path*", "destination": "/admin/:path*.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(recommend|login|admin)(.*)",
+      "headers": [
+        { "key": "X-Robots-Tag", "value": "noindex, nofollow" }
+      ]
+    },
+    {
+      "source": "/(.*).html",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/(.*).js",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/(.*).css",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    }
+  ]
+}

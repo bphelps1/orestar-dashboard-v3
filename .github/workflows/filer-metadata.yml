@@ -1,0 +1,192 @@
+name: Scrape Filer Metadata
+
+on:
+  schedule:
+    # Wednesdays at 20:00 UTC — deliberately far from everything else.
+    #
+    # This used to be Sunday 08:00, two hours after the balances scrape at
+    # 06:00. Two hours is not a gap: scheduled runs start a median of 71-105
+    # minutes late and sometimes nearly three hours late, and the balances
+    # CHAIN runs up to ~2 hours once it starts. On 2 August the two collided
+    # and this job was cancelled outright — evicted from the shared lane with
+    # zero jobs recorded, which reads exactly like someone pressed cancel.
+    #
+    # A different day puts hours of margin around the jitter instead of
+    # minutes. Nothing here is time-sensitive; it only needs to run weekly.
+    - cron: "0 20 * * 3"
+  workflow_dispatch:
+    inputs:
+      max_filers:
+        description: "Max filers per batch (0 = all uncached)"
+        required: false
+        default: "500"
+      force:
+        description: "Force re-scrape even if cached"
+        required: false
+        default: "false"
+      filer_ids:
+        description: >
+          Space-separated filer IDs to refresh even if cached (e.g. to record a
+          Discontinuation filing). Targeted runs do not chain into a full sweep.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: write          # needed to retrigger itself
+
+# Give each run its own pending slot. A static/shared group lets GitHub evict an
+# older waiter when another run arrives, including the exact replacement just
+# queued after a coordination timeout. await-orestar provides the real,
+# fail-closed total ordering before any scraper reaches the site.
+concurrency:
+  group: filer-metadata-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    if: github.event_name == 'workflow_dispatch' || vars.PIPELINE_SCHEDULES_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Never let two ORESTAR scrapers run at once — see
+      # .github/actions/await-orestar for why this is a runtime check rather
+      # than a concurrency group or a schedule gap.
+      - name: Wait for other ORESTAR jobs
+        id: orestar_wait
+        continue-on-error: true
+        uses: ./.github/actions/await-orestar
+        with:
+          max-wait-minutes: "30"
+          fail-on-timeout: "true"
+
+      - name: Requeue after coordination timeout
+        if: steps.orestar_wait.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/dispatch_retry.sh filer-metadata.yml --ref "${{ github.ref_name }}" \
+            -f max_filers="${{ github.event.inputs.max_filers || '500' }}" \
+            -f force="${{ github.event.inputs.force || 'false' }}" \
+            -f filer_ids="${{ github.event.inputs.filer_ids || '' }}"
+
+      - name: Refuse uncoordinated metadata scrape
+        if: steps.orestar_wait.outcome == 'failure'
+        run: |
+          echo "::error::ORESTAR remained busy; queued the same metadata batch instead of overlapping it."
+          exit 1
+
+      - name: Refresh branch after coordination wait
+        # filer_metadata.json is cumulative. Keep entries written by the run
+        # that held the ORESTAR lane while this checkout was waiting.
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Hydrate pipeline state
+        id: state
+        run: python scripts/pipeline_state.py pull transactions summaries auxiliary
+
+      - name: Install Playwright browser + system dependencies
+        # Bounded and retried: a hung install held the ORESTAR lane for 3 hours
+        # against the job's 300-minute timeout. 18 minutes is the backstop for
+        # the script's own 3 x 300s cap.
+        timeout-minutes: 25
+        run: bash scripts/install_playwright.sh
+
+      - name: Install Xvfb (virtual display for headed browser)
+        run: sudo apt-get install -y xvfb
+
+      - name: Scrape filer metadata (party, office, type)
+        id: scrape
+        run: |
+          MAX="${{ github.event.inputs.max_filers || '500' }}"
+          FORCE="${{ github.event.inputs.force || 'false' }}"
+          FILER_IDS="${{ github.event.inputs.filer_ids || '' }}"
+          ARGS=""
+          if [ -n "$FILER_IDS" ]; then
+            # Targeted refresh: exactly these filers, no chained sweep after.
+            # shellcheck disable=SC2086
+            xvfb-run --auto-servernum python scraper/fetch_filer_metadata.py --filer-ids $FILER_IDS
+            echo "remaining=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$MAX" != "0" ]; then
+            ARGS="$ARGS --max-filers $MAX"
+          fi
+          if [ "$FORCE" = "true" ]; then
+            ARGS="$ARGS --force"
+          fi
+          xvfb-run --auto-servernum python scraper/fetch_filer_metadata.py $ARGS
+          # Capture remaining count directly from the file the scraper just wrote
+          REMAINING=$(cat data/filer_metadata_remaining.txt 2>/dev/null || echo "0")
+          echo "remaining=$REMAINING" >> "$GITHUB_OUTPUT"
+
+      - name: Re-aggregate with updated metadata
+        id: aggregate
+        if: always() && steps.orestar_wait.outcome == 'success' && steps.state.outcome == 'success'
+        # 14-23 minutes over the last three runs. The pooler hides a dead
+        # backend (2026-09-23), so a hang has to be ended here.
+        timeout-minutes: 60
+        run: python scraper/process.py
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: exports
+
+      # See the note in atomic-balance-evidence.yml: process.py rebuilds the
+      # donor blobs from raw labels, so the re-key has to follow it every time.
+      - name: Re-key donors onto resolved entities
+        if: always() && !cancelled() && steps.aggregate.outcome == 'success'
+        timeout-minutes: 15
+        run: python scraper/refresh_donor_aggregates.py
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: exports
+
+      - name: Publish metadata state
+        id: publish
+        if: always() && steps.orestar_wait.outcome == 'success' && steps.state.outcome == 'success'
+        run: python scripts/pipeline_state.py push auxiliary
+
+      - name: Check if more filers remain and retrigger
+        if: always() && steps.orestar_wait.outcome == 'success' && steps.publish.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Use the remaining count captured BEFORE git operations (immune to rebase)
+          REMAINING="${{ steps.scrape.outputs.remaining }}"
+          echo "Filers remaining: $REMAINING"
+          if [ -n "$REMAINING" ] && [ "$REMAINING" -gt 0 ] 2>/dev/null; then
+            echo "Retriggering workflow for next batch..."
+            bash scripts/dispatch_retry.sh filer-metadata.yml \
+              -f max_filers="${{ github.event.inputs.max_filers || '500' }}" \
+              -f force="false"
+            echo "Retrigger dispatched."
+          else
+            echo "All filers scraped — no retrigger needed."
+          fi

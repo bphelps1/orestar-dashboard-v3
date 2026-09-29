@@ -1,0 +1,114 @@
+name: Amendment Chains (targeted)
+
+# Reads the amendment chains ORESTAR's default search hides, for named
+# committee-years, with "Include Deleted" and "Show Expired" ticked and each
+# chain's Transaction History page. Aggregation uses them only where ORESTAR's
+# early-era counting reproduces its own summary line to the cent (see
+# scraper/orestar_amendment_chains.py). Balances change on the next
+# aggregation, not here.
+#
+# Must run HEADED under xvfb: ORESTAR's F5 bot defense blocks headless Chromium.
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: >
+          Space-separated FILER:YEAR:TYPES, e.g. "3215:2006:C,E 2281:2007:E".
+          TYPES are C (contributions), E (expenditures), OR (other receipts)
+          and/or OD (other disbursements).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write          # requeue instead of overlapping after a busy timeout
+
+concurrency:
+  # A requeued run needs its own pending slot; await-orestar serializes the
+  # whole workflow before site access and pipeline_state.py handles publication.
+  group: amendment-chains-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  chains:
+    runs-on: ubuntu-latest
+    # 25m coordination wait + up to 25m browser install + a 30m collection
+    # budget, with room for setup and a retry dispatch.
+    timeout-minutes: 100
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_STORAGE_BUCKET: exports
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Never let two ORESTAR scrapers run at once — see
+      # .github/actions/await-orestar for why this is a runtime check rather
+      # than a concurrency group or a schedule gap.
+      - name: Wait for other ORESTAR jobs
+        id: orestar_wait
+        continue-on-error: true
+        uses: ./.github/actions/await-orestar
+        with:
+          max-wait-minutes: "25"
+          fail-on-timeout: "true"
+
+      - name: Requeue after coordination timeout
+        if: steps.orestar_wait.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/dispatch_retry.sh amendment-chains.yml --ref "${{ github.ref_name }}" \
+            -f targets="${{ inputs.targets }}"
+
+      - name: Refuse uncoordinated chain collection
+        if: steps.orestar_wait.outcome == 'failure'
+        run: |
+          echo "::error::ORESTAR remained busy; queued a replacement chain collection instead of overlapping it."
+          exit 1
+
+      - name: Refresh branch after coordination wait
+        run: |
+          git fetch --depth=1 origin "$GITHUB_REF_NAME"
+          git reset --hard FETCH_HEAD
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Hydrate summary state
+        run: python scripts/pipeline_state.py pull summaries
+
+      - name: Install Playwright chromium + system dependencies
+        # Bounded and retried: a hung install held the ORESTAR lane for 3 hours
+        # against the job's 300-minute timeout. 18 minutes is the backstop for
+        # the script's own 3 x 300s cap.
+        timeout-minutes: 25
+        run: bash scripts/install_playwright.sh
+
+      - name: Install Xvfb (headed browser required — headless is blocked)
+        run: sudo apt-get install -y xvfb
+
+      - name: Collect amendment chains
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          # Word-split on purpose: one argument per FILER:YEAR:TYPES target.
+          # shellcheck disable=SC2086
+          xvfb-run --auto-servernum python scraper/fetch_amendment_chains.py \
+            --targets $TARGETS --max-minutes 30
+
+      - name: Publish summary state
+        run: python scripts/pipeline_state.py push summaries

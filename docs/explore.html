@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Explore — Oregon Campaign Finance</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="lib/donor-names.js"></script>
+  <script src="lib/supabase.js"></script>
+  <style>
+    .explore-wrap { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+    .explore-intro { color: var(--text-muted, #555); margin: .25rem 0 1rem; }
+    .xp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; }
+    .xp-field { display: flex; flex-direction: column; gap: .25rem; }
+    .xp-field label { font-size: .8rem; font-weight: 600; color: #444; }
+    .xp-field input, .xp-field select {
+      padding: .45rem .5rem; border: 1px solid #ccc; border-radius: 6px; font-size: .9rem; width: 100%;
+    }
+    .xp-actions { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin: 1rem 0; }
+    .xp-btn {
+      padding: .5rem .9rem; border: 1px solid #2b6cb0; background: #2b6cb0; color: #fff;
+      border-radius: 6px; font-size: .9rem; cursor: pointer;
+    }
+    .xp-btn.secondary { background: #fff; color: #2b6cb0; }
+    .xp-btn:disabled { opacity: .5; cursor: default; }
+    .xp-status { color: #666; font-size: .85rem; margin-left: auto; }
+    .xp-table-wrap { overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; }
+    table.xp-table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    table.xp-table th, table.xp-table td { padding: .45rem .6rem; border-bottom: 1px solid #edf2f7; text-align: left; white-space: nowrap; }
+    table.xp-table th { background: #f7fafc; position: sticky; top: 0; cursor: pointer; user-select: none; }
+    table.xp-table td.num, table.xp-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .xp-pager { display: flex; gap: .5rem; align-items: center; margin: .75rem 0; }
+    .xp-section { margin-top: 2.5rem; }
+    .xp-section h2 { font-size: 1.1rem; }
+    #sql-input {
+      width: 100%; min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .85rem; padding: .6rem; border: 1px solid #ccc; border-radius: 6px; resize: vertical;
+    }
+    .xp-note { font-size: .8rem; color: #718096; margin: .4rem 0; }
+    .xp-error { color: #c53030; font-size: .85rem; margin: .5rem 0; white-space: pre-wrap; }
+    .xp-donor-results {
+      position: absolute; top: 100%; left: 0; right: 0; z-index: 30;
+      background: #fff; border: 1px solid #e2e8f0; border-radius: 6px;
+      box-shadow: 0 6px 18px rgba(0,0,0,.08); max-height: 300px; overflow-y: auto;
+      list-style: none; margin: 2px 0 0; padding: 0; font-size: .85rem;
+    }
+    .xp-donor-results li { padding: .4rem .6rem; cursor: pointer; }
+    .xp-donor-results li:hover { background: #ebf4ff; }
+    .xp-donor-results .sub { color: #718096; font-size: .75rem; }
+    .xp-entity-chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: #ebf4ff; color: #2b6cb0; border-radius: 4px;
+      font-size: .75rem; padding: 1px 6px; margin-top: 3px;
+    }
+    .xp-entity-chip button { border: 0; background: none; color: inherit; cursor: pointer; font-size: .9em; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">Public ORESTAR data · Explore &amp; query all transactions, 2006–present</p>
+  </div>
+</header>
+
+<nav class="tab-nav" role="tablist">
+  <div class="tab-nav-inner">
+    <a class="tab-btn tab-link" href="/">← Dashboard</a>
+    <span class="tab-btn active">Explore</span>
+    <a class="tab-btn tab-link" href="/donors">Donor Lookup</a>
+    <span class="tab-sep" aria-hidden="true"></span>
+    <a class="tab-btn tab-link tab-login" id="login-tab" href="/login">Login</a>
+  </div>
+</nav>
+
+<main class="explore-wrap">
+  <p class="explore-intro">
+    Filter the full transaction dataset, download what you select, or run your own read-only SQL.
+  </p>
+
+  <!-- ── Filters ─────────────────────────────────────────────── -->
+  <div class="xp-grid">
+    <div class="xp-field">
+      <label for="f-filer">Committee (filer)</label>
+      <input type="text" id="f-filer" placeholder="e.g. Kotek" />
+    </div>
+    <div class="xp-field" style="position:relative">
+      <label for="f-payee">Donor / payee</label>
+      <input type="text" id="f-payee" placeholder="e.g. Nike" autocomplete="off" />
+      <ul class="xp-donor-results" id="f-payee-results" hidden></ul>
+    </div>
+    <div class="xp-field">
+      <label for="f-type">Transaction type</label>
+      <select id="f-type">
+        <option value="">Any</option>
+        <optgroup label="Contributions (C)">
+          <option value="C">All contributions</option>
+          <option value="C|Cash Contribution">Cash Contribution</option>
+          <option value="C|In-Kind Contribution">In-Kind Contribution</option>
+          <option value="C|Loan Received (Non-Exempt)">Loan Received (Non-Exempt)</option>
+          <option value="C|Pledge of Cash">Pledge of Cash</option>
+          <option value="C|In-Kind/Forgiven Personal Expenditures">In-Kind/Forgiven Personal Expenditures</option>
+          <option value="C|In-Kind/Forgiven Account Payable">In-Kind/Forgiven Account Payable</option>
+          <option value="C|Pledge of In-Kind">Pledge of In-Kind</option>
+          <option value="C|Pledge of Loan">Pledge of Loan</option>
+        </optgroup>
+        <optgroup label="Expenditures (E)">
+          <option value="E">All expenditures</option>
+          <option value="E|Cash Expenditure">Cash Expenditure</option>
+          <option value="E|Personal Expenditure for Reimbursement">Personal Expenditure for Reimbursement</option>
+          <option value="E|Account Payable">Account Payable</option>
+          <option value="E|Expenditure Made by an Agent">Expenditure Made by an Agent</option>
+          <option value="E|Loan Payment (Non-Exempt)">Loan Payment (Non-Exempt)</option>
+        </optgroup>
+        <optgroup label="Other receipts (OR)">
+          <option value="OR">All other receipts</option>
+          <option value="OR|Items Sold at Fair Market Value">Items Sold at Fair Market Value</option>
+          <option value="OR|Miscellaneous Other Receipt">Miscellaneous Other Receipt</option>
+          <option value="OR|Interest/Investment Income">Interest/Investment Income</option>
+          <option value="OR|Refunds and Rebates">Refunds and Rebates</option>
+          <option value="OR|Lost or Returned Check">Lost or Returned Check</option>
+          <option value="OR|Loan Received (Exempt)">Loan Received (Exempt)</option>
+        </optgroup>
+        <optgroup label="Other disbursements (OD)">
+          <option value="OD">All other disbursements</option>
+          <option value="OD|Miscellaneous Other Disbursement">Miscellaneous Other Disbursement</option>
+          <option value="OD|Return or Refund of Contribution">Return or Refund of Contribution</option>
+          <option value="OD|Nonpartisan Activity">Nonpartisan Activity</option>
+          <option value="OD|Loan Payment (Exempt)">Loan Payment (Exempt)</option>
+        </optgroup>
+        <optgroup label="Adjustments (O)">
+          <option value="O">All adjustments</option>
+          <option value="O|Cash Balance Adjustment">Cash Balance Adjustment</option>
+          <option value="O|Loan Forgiven (Non-Exempt)">Loan Forgiven (Non-Exempt)</option>
+          <option value="O|Account Payable Rescinded">Account Payable Rescinded</option>
+          <option value="O|Uncollectible Pledge of Cash">Uncollectible Pledge of Cash</option>
+          <option value="O|Personal Expenditure Balance Adjustment">Personal Expenditure Balance Adjustment</option>
+          <option value="O|Uncollectible Pledge of In-Kind">Uncollectible Pledge of In-Kind</option>
+        </optgroup>
+        <optgroup label="Receivables (OA)">
+          <option value="OA">All receivables</option>
+          <option value="OA|Miscellaneous Account Receivable">Miscellaneous Account Receivable</option>
+          <option value="OA|Unexpended Agent Balance">Unexpended Agent Balance</option>
+        </optgroup>
+      </select>
+    </div>
+    <div class="xp-field">
+      <label for="f-ctype">Contributor type</label>
+      <input type="text" id="f-ctype" placeholder="e.g. Individual, Business Entity" />
+    </div>
+    <div class="xp-field">
+      <label for="f-date-start">From date</label>
+      <input type="date" id="f-date-start" />
+    </div>
+    <div class="xp-field">
+      <label for="f-date-end">To date</label>
+      <input type="date" id="f-date-end" />
+    </div>
+    <div class="xp-field">
+      <label for="f-amt-min">Min amount ($)</label>
+      <input type="number" id="f-amt-min" step="any" placeholder="0" />
+    </div>
+    <div class="xp-field">
+      <label for="f-amt-max">Max amount ($)</label>
+      <input type="number" id="f-amt-max" step="any" placeholder="—" />
+    </div>
+  </div>
+
+  <div class="xp-actions">
+    <button class="xp-btn" id="btn-search">Search</button>
+    <button class="xp-btn secondary" id="btn-reset">Reset</button>
+    <button class="xp-btn secondary" id="btn-download">Download filtered (CSV)</button>
+    <span class="xp-status" id="xp-status"></span>
+  </div>
+
+  <div class="xp-error" id="xp-error" hidden></div>
+
+  <div class="xp-table-wrap">
+    <table class="xp-table" id="xp-table">
+      <thead id="xp-thead"></thead>
+      <tbody id="xp-tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="xp-pager">
+    <button class="xp-btn secondary" id="pg-prev" disabled>‹ Prev</button>
+    <span id="pg-label">—</span>
+    <button class="xp-btn secondary" id="pg-next" disabled>Next ›</button>
+  </div>
+
+  <!-- ── SQL box ─────────────────────────────────────────────── -->
+  <section class="xp-section">
+    <h2>Run your own SQL</h2>
+    <p class="xp-note">
+      Read-only. Query the <code>transactions</code> table (friendly column names:
+      <code>filer</code>, <code>contributor_payee</code>, <code>contributor_type</code>,
+      <code>amount</code>, <code>tran_date</code>, <code>tran_type</code>,
+      <code>city</code>, <code>state</code>, <code>employer</code>, <code>occupation</code>, …).
+      One <code>SELECT</code> statement, 25-second limit, up to 5,000 rows returned.
+    </p>
+    <textarea id="sql-input">select filer, sum(amount) as total
+from transactions
+where tran_type = 'C'
+group by filer
+order by total desc
+limit 20</textarea>
+    <div class="xp-actions">
+      <button class="xp-btn" id="btn-sql">Run SQL</button>
+      <button class="xp-btn secondary" id="btn-sql-csv" disabled>Download results (CSV)</button>
+      <span class="xp-status" id="sql-status"></span>
+    </div>
+    <div class="xp-error" id="sql-error" hidden></div>
+    <div class="xp-table-wrap">
+      <table class="xp-table" id="sql-table">
+        <thead id="sql-thead"></thead>
+        <tbody id="sql-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script src="explore.js"></script>
+</body>
+</html>
