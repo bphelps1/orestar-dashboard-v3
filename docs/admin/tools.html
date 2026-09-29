@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin — Oregon Campaign Finance</title>
+  <link rel="stylesheet" href="../style.css" />
+  <link rel="stylesheet" href="../recommend.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <h1>Oregon Campaign Finance</h1>
+    <p class="provenance">Admin</p>
+  </div>
+</header>
+
+<nav class="tab-nav tools-nav" aria-label="Campaign tools">
+  <div class="tab-nav-inner">
+    <a class="tab-btn tab-link" href="/">← Dashboard</a>
+    <a class="tab-btn" href="/recommend">Recommend</a>
+    <a class="tab-btn" href="/admin/lobbyists" data-needs-admin hidden>Lobbyists</a>
+    <a class="tab-btn" href="/admin/donors" data-needs-admin hidden>Donor admin</a>
+    <span class="tab-sep tools-account" aria-hidden="true" hidden></span>
+    <span class="tools-account" hidden>
+      <span class="tools-user" id="user-info"></span>
+      <button type="button" class="btn-small" id="sign-out-btn">Sign Out</button>
+    </span>
+  </div>
+</nav>
+
+<main id="app-content" hidden>
+  <p class="loading-msg">Loading…</p>
+</main>
+
+<footer>
+  <p>Oregon Campaign Finance</p>
+</footer>
+
+<script src="../lib/supabase.js"></script>
+<script>
+// A generic shell for admin-only tools. Which tools exist and what each one
+// loads come from a private manifest only the admin role can read (see
+// adminTools() in lib/supabase.js), so this page names none of them.
+document.addEventListener("DOMContentLoaded", async () => {
+  const session = await requireAdmin();
+  if (!session) return;
+  const tools = await adminTools();
+  const tool = tools.find(t => t.id === window.location.hash.slice(1)) || tools[0];
+  if (!tool) { showAdminOnly(session); return; }
+  document.title = `${tool.title} — Oregon Campaign Finance`;
+  if (await loadPrivatePage(tool)) await window[tool.start](session);
+});
+// The nav links only change the #fragment; load the tool it names.
+window.addEventListener("hashchange", () => window.location.reload());
+</script>
+</body>
+</html>

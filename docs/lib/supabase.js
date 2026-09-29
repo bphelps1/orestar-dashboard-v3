@@ -56,17 +56,71 @@ async function requireAdmin() {
     return null;
   }
   if (!(await isAdminOrReviewer())) {
-    const notice = document.createElement("main");
-    notice.className = "admin-only";
-    notice.innerHTML = `<h2>Admins only</h2>
-      <p>This page is limited to admins and reviewers. You're signed in as <strong></strong>.</p>
-      <a class="btn-primary" href="/login">Back to your tools</a>`;
-    notice.querySelector("strong").textContent = session.user.email;
-    document.getElementById("app-content").before(notice);
+    showAdminOnly(session, "admins and reviewers");
     return null;
   }
   document.getElementById("app-content").hidden = false;
   return session;
+}
+
+/** The notice shown in place of a page to a signed-in user who may not see it. */
+function showAdminOnly(session, who = "admins") {
+  document.getElementById("app-content").hidden = true;
+  const notice = document.createElement("main");
+  notice.className = "admin-only";
+  notice.innerHTML = `<h2>Admins only</h2>
+    <p>This page is limited to <span></span>. You're signed in as <strong></strong>.</p>
+    <a class="btn-primary" href="/login">Back to your tools</a>`;
+  notice.querySelector("span").textContent = who;
+  notice.querySelector("strong").textContent = session.user.email;
+  document.getElementById("app-content").before(notice);
+}
+
+// ── Admin-only tools ──────────────────────────────────────────────────────
+// Which admin-only tools exist, and what each one loads, is listed in a
+// manifest in the private bucket that only the admin role can read. This site
+// names none of them: /admin/tools#<id> is a generic shell, and the nav links
+// and hub cards below are built from the manifest for admins alone.
+let _adminTools = null;
+function adminTools() {
+  if (!_adminTools) _adminTools = (async () => {
+    try {
+      const res = await fetchPrivate("admin-only/tools.json");
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (Array.isArray(data.tools) ? data.tools : [])
+        .filter(t => /^[a-z0-9-]+$/.test(t.id || "") && t.title && t.markup && t.start);
+    } catch (e) {
+      return [];
+    }
+  })();
+  return _adminTools;
+}
+
+function addAdminTools(tools) {
+  const onToolsPage = /^\/admin\/tools(\.html)?$/.test(window.location.pathname);
+  const current = window.location.hash.slice(1) || tools[0]?.id;
+  document.querySelectorAll(".tools-nav .tab-nav-inner").forEach(nav => {
+    const before = nav.querySelector(".tab-sep.tools-account");
+    for (const tool of tools) {
+      const a = document.createElement("a");
+      a.className = "tab-btn" + (onToolsPage && tool.id === current ? " active" : "");
+      a.href = `/admin/tools#${tool.id}`;
+      a.textContent = tool.title;
+      nav.insertBefore(a, before);
+    }
+  });
+  const cards = document.querySelector("#tools-hub .tool-cards");
+  for (const tool of cards ? tools : []) {
+    const card = document.createElement("a");
+    card.className = "tool-card";
+    card.href = `/admin/tools#${tool.id}`;
+    card.innerHTML = `<h3><span></span> <span class="tool-card-tag">Admin</span></h3><p></p><span class="tool-card-go"></span>`;
+    card.querySelector("h3 span").textContent = tool.title;
+    card.querySelector("p").textContent = tool.description || "";
+    card.querySelector(".tool-card-go").textContent = `Open ${tool.title} →`;
+    cards.appendChild(card);
+  }
 }
 
 // ── Signed-in-only files ──────────────────────────────────────────────────
@@ -226,10 +280,14 @@ async function initAccountNav() {
   if (out) out.addEventListener("click", signOut);
   document.querySelectorAll(".tools-account").forEach(el => { el.hidden = false; });
 
-  // Admin-only links (lobbyist attribution, donor admin) stay hidden for other users.
-  const gated = document.querySelectorAll("[data-needs-admin]");
-  if (gated.length && await isAdminOrReviewer()) {
-    gated.forEach(el => { el.hidden = false; });
+  // Admin links (lobbyist attribution, donor admin) stay hidden for other users;
+  // admin-only tools are added from the private manifest for the admin role.
+  const role = await getUserRole();
+  if (role === "admin" || role === "reviewer") {
+    document.querySelectorAll("[data-needs-admin]").forEach(el => { el.hidden = false; });
+  }
+  if (role === "admin" && (document.querySelector(".tools-nav") || document.getElementById("tools-hub"))) {
+    addAdminTools(await adminTools());
   }
 }
 
