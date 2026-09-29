@@ -135,3 +135,18 @@ def test_recommend_tool_is_not_in_this_repository() -> None:
     # Notes stay in the repository: never uploaded, and redirected if they were.
     assert "docs/**/*.md" in (ROOT / ".vercelignore").read_text().split()
     assert any(r["source"] == "/(.*)\\.md" for r in config["redirects"])
+
+def test_admin_only_tools_are_not_named_here() -> None:
+    """Admin-only tools load through the generic /admin/tools shell from a
+    private manifest; this repository must not name them or their data."""
+    shell = (ROOT / "docs/admin/tools.html").read_text()
+    assert "adminTools()" in shell and "loadPrivatePage(tool)" in shell
+    assert 'fetchPrivate("admin-only/tools.json")' in (ROOT / "docs/lib/supabase.js").read_text()
+    # Hex-encoded so this check doesn't name what it forbids.
+    forbidden = [bytes.fromhex(h).decode() for h in ("6361756375732064756573", "6475657320747261636b6572", "747261636b65725f726f7773")]
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.split()
+    for path in tracked:
+        if path.endswith((".py", ".js", ".html", ".css", ".md", ".yml", ".json", ".sql")):
+            text = (ROOT / path).read_text(errors="ignore").lower()
+            for phrase in forbidden:
+                assert phrase not in text, (path, "names an admin-only tool")
