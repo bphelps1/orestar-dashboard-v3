@@ -1477,94 +1477,6 @@ function makeBarChart(containerId, labels, values, label, color = "#3182ce") {
   return chart;
 }
 
-function makeLineChart(containerId, labels, datasets) {
-  const el = document.getElementById(containerId);
-  if (!el) return null;
-  el.className = "echart-container";
-
-  const chart = initEChart(el);
-  const series = datasets.map(ds => ({
-    name: ds.label,
-    type: 'line',
-    data: ds.data,
-    symbol: 'none',
-    lineStyle: {
-      color: ds.borderColor,
-      width: 2,
-      type: ds.lineType || 'solid',
-    },
-    itemStyle: { color: ds.borderColor },
-    areaStyle: ds.fill ? { color: ds.backgroundColor, opacity: 0.3 } : undefined,
-    smooth: ds.tension ? true : false,
-  }));
-
-  // Only show legend entries for datasets that opt in (or all if none specify)
-  const legendEntries = datasets.filter(d => d.showInLegend !== false).map(d => d.label);
-  const hasHiddenLegend = datasets.some(d => d.showInLegend === false);
-  const legendRows = Math.ceil(legendEntries.length / (IS_MOBILE ? 2 : 3));
-  const legendHeight = legendRows * (IS_MOBILE ? 18 : 22) + (hasHiddenLegend ? 20 : 10);
-
-  chart.setOption({
-    tooltip: {
-      trigger: 'axis',
-      position: tooltipPosition,
-      formatter: params => {
-        let html = `<div style="font-weight:600;margin-bottom:4px">${params[0]?.axisValue || ''}</div>`;
-        params.forEach(p => {
-          html += `<div>${p.marker} ${p.seriesName}: <strong>${fmt$(p.value)}</strong></div>`;
-        });
-        return html;
-      },
-    },
-    legend: {
-      data: legendEntries,
-      top: 0,
-      textStyle: { fontSize: IS_MOBILE ? 9 : 11 },
-      itemGap: IS_MOBILE ? 8 : 15,
-      padding: [0, 0, 5, 0],
-    },
-    grid: {
-      left: IS_MOBILE ? 10 : 20,
-      right: IS_MOBILE ? 10 : 20,
-      top: legendHeight,
-      bottom: IS_MOBILE ? 80 : 40,
-      containLabel: true,
-    },
-    xAxis: {
-      type: 'category',
-      data: labels,
-      axisLabel: {
-        fontSize: IS_MOBILE ? 9 : 11,
-        rotate: 45,
-      },
-    },
-    yAxis: {
-      type: 'value',
-      axisLabel: {
-        formatter: v => fmtCompact$(v),
-        fontSize: IS_MOBILE ? 9 : 12,
-      },
-    },
-    dataZoom: IS_MOBILE ? [
-      { type: 'slider', start: 70, end: 100, height: 25, bottom: 5 },
-      { type: 'inside' },
-    ] : [{ type: 'inside' }],
-    graphic: hasHiddenLegend ? [{
-      type: 'text',
-      left: 'center',
-      top: legendRows * (IS_MOBILE ? 20 : 24) + 4,
-      style: {
-        text: 'Solid = Contributions · Dashed = Expenditures',
-        fontSize: IS_MOBILE ? 8 : 10,
-        fill: '#9ca3af',
-      },
-    }] : [],
-    series,
-  });
-
-  return chart;
-}
-
 // ── Donor → Filer linking layer ────────────────────────────────────────────────
 
 async function ensureDonorFilerMap() {
@@ -3032,7 +2944,7 @@ function renderOverviewMultiFiler(profiles) {
   setStatewideCashNote(false);
   const pulseEl = document.getElementById("campaign-pulse");
   if (pulseEl) pulseEl.hidden = true;
-  if (typeof ccSetScope === "function") ccSetScope("none");
+  if (typeof ccSetScope === "function") ccSetScope("none", null, profiles);
   setOverviewTiles("multi");
   const partyBox = document.getElementById("party-fundraising-box");
   if (partyBox) partyBox.hidden = true;
@@ -3839,134 +3751,15 @@ async function loadTimeline() {
   if (!timelineData) {
     timelineData = await DL.getBlob("timeline");
   }
-
-  const n = state.selectedFilers.length;
-  const hasDate = state.dateStart || state.dateEnd;
-
-  if (n === 0) {
-    renderTimeline("all");
-  } else if (n === 1) {
-    // Single filer: use same green/amber as global view
-    const profile = await loadFilerProfile(state.selectedFilers[0].slug);
-    renderTimelineSingleFiler(profile);
-  } else {
-    const profiles = await Promise.all(state.selectedFilers.map(f => loadFilerProfile(f.slug)));
-    renderTimelineMultiFiler(profiles);
-  }
-}
-
-function renderTimeline(year) {
-  // Cycle comparison is a statewide aggregate, so it belongs to this view only.
-  if (typeof initCycleCompare === "function") {
-    try { initCycleCompare(); } catch (e) { console.warn("[cyclecompare]", e); }
-  }
-  // Date range takes precedence over year dropdown
-  let rows;
-  if (state.dateStart || state.dateEnd) {
-    rows = filterMonthRows(timelineData);
-  } else {
-    rows = year === "all"
-      ? timelineData.filter(r => r.month >= "2006-01")
-      : timelineData.filter(r => r.month.startsWith(year));
-  }
-
-  makeLineChart(
-    "chart-timeline",
-    rows.map(r => r.month),
-    [
-      {
-        label: "Contributions",
-        data: rows.map(r => r.contributions || 0),
-        borderColor: "#16a34a",
-        backgroundColor: "rgba(22,163,74,0.08)",
-        fill: true,
-        tension: 0.3,
-        pointRadius: rows.length > 60 ? 0 : 3,
-      },
-      {
-        label: "Expenditures",
-        data: rows.map(r => r.expenditures || 0),
-        borderColor: "#d97706",
-        backgroundColor: "rgba(217,119,6,0.08)",
-        fill: true,
-        tension: 0.3,
-        pointRadius: rows.length > 60 ? 0 : 3,
-      },
-    ],
-  );
-}
-
-function renderTimelineSingleFiler(profile) {
-  const sm = state.dateStart ? state.dateStart.slice(0, 7) : null;
-  const em = state.dateEnd ? state.dateEnd.slice(0, 7) : null;
-  const rows = (profile.timeline || [])
-    .filter(t => t.month >= "2006-01")
-    .filter(t => (!sm || t.month >= sm) && (!em || t.month <= em));
-
-  makeLineChart(
-    "chart-timeline",
-    rows.map(r => r.month),
-    [
-      {
-        label: "Contributions",
-        data: rows.map(r => r.contributions || 0),
-        borderColor: "#16a34a",
-        backgroundColor: "rgba(22,163,74,0.08)",
-        fill: true,
-        tension: 0.3,
-        pointRadius: rows.length > 60 ? 0 : 3,
-      },
-      {
-        label: "Expenditures",
-        data: rows.map(r => r.expenditures || 0),
-        borderColor: "#d97706",
-        backgroundColor: "rgba(217,119,6,0.08)",
-        fill: true,
-        tension: 0.3,
-        pointRadius: rows.length > 60 ? 0 : 3,
-      },
-    ],
-  );
-}
-
-function renderTimelineMultiFiler(profiles) {
-  // Union of all months across profiles, filtered to date range
-  const monthSet = new Set();
-  profiles.forEach(p => (p.timeline || []).forEach(t => monthSet.add(t.month)));
-  const sm = state.dateStart ? state.dateStart.slice(0, 7) : null;
-  const em = state.dateEnd   ? state.dateEnd.slice(0, 7)   : null;
-  const months = [...monthSet].sort().filter(m => (!sm || m >= sm) && (!em || m <= em));
-
-  const datasets = [];
-  profiles.forEach((profile, idx) => {
-    const color  = PALETTE[idx % PALETTE.length];
-    const byMonth = new Map((profile.timeline || []).map(t => [t.month, t]));
-
-    datasets.push({
-      label: `${profile.name}`,
-      data: months.map(m => (byMonth.get(m) || {}).contributions || 0),
-      borderColor: color,
-      backgroundColor: "transparent",
-      fill: false,
-      tension: 0.3,
-      pointRadius: months.length > 60 ? 0 : 3,
-      lineType: 'solid',
-      showInLegend: true,
-    });
-    datasets.push({
-      label: `${profile.name} (Expend)`,
-      data: months.map(m => (byMonth.get(m) || {}).expenditures || 0),
-      borderColor: color,
-      backgroundColor: "transparent",
-      fill: false,
-      tension: 0.3,
-      pointRadius: months.length > 60 ? 0 : 3,
-      lineType: 'dashed',
-      showInLegend: false,
-    });
-  });
-
-  makeLineChart("chart-timeline", months, datasets);
+  // The fundraising tile is the cycle comparison alone. The renderOverview*
+  // functions have already pointed it at one committee or several; with
+  // nothing selected it covers every committee.
+  if (typeof initCycleCompare !== "function") return;
+  try {
+    if (state.selectedFilers.length === 0) ccSetScope("statewide");
+    initCycleCompare();
+    ccDrawFundraising();
+  } catch (e) { console.warn("[cyclecompare]", e); }
 }
 
 // ── Party Fundraising ───────────────────────────────────────────────────

@@ -3,10 +3,11 @@
  *
  *   Who Funds Oregon Campaigns  → donor-type composition, this cycle vs a past one
  *   Who Funds Oregon's Parties  → party composition, same treatment
- *   Monthly Cash Flow           → cumulative raised, cut at the same calendar day
+ *   Fundraising vs past cycles  → cumulative raised, cut at the same calendar day
  *
- * Each chart keeps its existing "Trend" view and gains a "Compare" view; the
- * originals are untouched so the filter toolbar keeps working as before.
+ * The first two keep their "Trend" view and gain a "Compare" view, so the
+ * filter toolbar keeps working on them as before. The fundraising tile is the
+ * comparison alone, with only a cycle picker.
  *
  * A cycle is Dec of the pre-election year → Nov of the election year, the same
  * definition the cycle preset buttons use.
@@ -334,10 +335,7 @@ let ccCashPick = 0;
 /** Draw the to-the-day comparison, or the monthly one if daily totals are unavailable. */
 async function ccDrawCash(cur, cycle, elapsed) {
   const pick = ++ccCashPick;
-  const ids = ccScope.mode === "filer"
-    ? (ccScope.profile.filer_ids && ccScope.profile.filer_ids.length
-        ? ccScope.profile.filer_ids : [ccScope.profile.filer_id]).filter(Boolean).map(String)
-    : null;
+  const ids = ccScope.filerIds;
   const [a, b] = await Promise.all([ccFetchDaily(cur, ids), ccFetchDaily(cycle, ids)]);
   if (pick !== ccCashPick) return;                         // a later pick wins
   if (a && b) ccRenderCashFlowDaily("cc-cash-chart", a, b, cur, cycle);
@@ -352,39 +350,57 @@ let ccWired = false;
  * What the comparison charts are comparing.
  *
  *   statewide — every committee; all three charts
- *   filer     — one committee's own money; donor mix and cash flow only, since
- *               "who funds the parties" is not a question about one committee
- *   none      — several committees at once; no comparison at all, because a
- *               single pair of bars cannot say which of them moved
+ *   filer     — one committee's own money; donor mix and fundraising only,
+ *               since "who funds the parties" is not a question about one
+ *               committee
+ *   none      — several committees at once; fundraising only, as their
+ *               combined total. A pair of composition bars cannot say which
+ *               of them moved, but one total over time reads fine.
+ *
+ * filerIds is what the fundraising chart sums: null for every committee.
  */
-let ccScope = { mode: "statewide", profile: null };
+let ccScope = { mode: "statewide", profile: null, profiles: [], filerIds: null };
+
+const ccIdsOf = p => (p && p.filer_ids && p.filer_ids.length ? p.filer_ids : [p && p.filer_id])
+  .filter(Boolean).map(String);
 
 const ccByMonth = () => ccScope.mode === "filer"
   ? (ccScope.profile.by_contributor_type_by_month || {})
   : ((typeof byTypeDataGlobal !== "undefined" && byTypeDataGlobal || {}).by_month || {});
 
-const ccTimeline = () => ccScope.mode === "filer"
-  ? (ccScope.profile.timeline || [])
+// Monthly fallback for the fundraising chart, while daily totals are missing.
+const ccTimeline = () => ccScope.mode === "filer" ? (ccScope.profile.timeline || [])
+  : ccScope.mode === "none" ? ccScope.profiles.flatMap(p => p.timeline || [])
   : (typeof timelineData !== "undefined" ? timelineData || [] : []);
 
 /** Controls this scope supports, by control id. */
 const CC_IN_SCOPE = {
-  statewide: ["cc-donortype", "cc-party", "cc-cash"],
-  filer:     ["cc-donortype", "cc-cash"],
+  statewide: ["cc-donortype", "cc-party"],
+  filer:     ["cc-donortype"],
   none:      [],
 };
 
 /**
- * Point the comparisons at a committee, the whole state, or nothing.
+ * Point the comparisons at a committee, several, or the whole state.
  *
  * Controls that fall out of scope snap back to Trend before hiding, so the
  * chart on screen is always the one the visible buttons describe. Controls
  * that stay in scope re-render, since the underlying numbers just changed.
+ * The fundraising chart is redrawn by loadTimeline(), once its data is in.
  */
-function ccSetScope(mode, profile) {
-  ccScope = { mode, profile: profile || null };
-  const allowed = CC_IN_SCOPE[mode] || [];
-  for (const id of ["cc-donortype", "cc-party", "cc-cash"]) {
+function ccSetScope(mode, profile, profiles) {
+  const list = profiles || [];
+  ccScope = {
+    mode, profile: profile || null, profiles: list,
+    filerIds: mode === "filer" ? ccIdsOf(profile)
+      : mode === "none" ? [...new Set(list.flatMap(ccIdsOf))] : null,
+  };
+  ccApplyScope();
+}
+
+function ccApplyScope() {
+  const allowed = CC_IN_SCOPE[ccScope.mode] || [];
+  for (const id of ["cc-donortype", "cc-party"]) {
     const sel = document.getElementById(id);
     const bar = sel && sel.closest(".cc-bar");
     if (!bar) continue;
@@ -429,9 +445,27 @@ function ccBuildControl(boxSel, id, onPick) {
   return sel;
 }
 
+/** The fundraising tile's only control: which past cycle to set against this one. */
+function ccBuildCycleSelect(boxSel, id, onPick) {
+  const box = document.querySelector(boxSel);
+  if (!box || box.querySelector(`#${id}`)) return null;
+  const cur = ccCurrentCycle();
+  const bar = document.createElement("div");
+  bar.className = "cc-bar";
+  bar.innerHTML = `<select id="${id}" class="cc-select" aria-label="Compare with">${
+    [cur - 2, cur - 4, cur - 6].map(y => `<option value="${y}">vs ${y} cycle</option>`).join("")}</select>`;
+  const h2 = box.querySelector("h2");
+  (h2 ? h2.parentNode : box).insertBefore(bar, h2 ? h2.nextSibling : box.firstChild);
+  const sel = bar.querySelector(`#${id}`);
+  sel.addEventListener("change", () => onPick(+sel.value));
+  return sel;
+}
+
+let ccDrawFundraising = () => {};
+
 function initCycleCompare() {
-  // renderTimeline() runs on every filter change; the controls are built once.
-  if (ccWired) { ccSetScope("statewide"); return; }
+  // loadTimeline() runs on every filter change; the controls are built once.
+  if (ccWired) return;
   ccWired = true;
 
   const cur = ccCurrentCycle();
@@ -467,9 +501,13 @@ function initCycleCompare() {
     swap("chart-party-fundraising", "cc-party-chart", cycle, () =>
       ccRenderParty("cc-party-chart", cur, cycle)));
 
-  ccBuildControl("#overview-timeline-box", "cc-cash", cycle =>
-    swap("chart-timeline", "cc-cash-chart", cycle, () =>
-      ccDrawCash(cur, cycle, elapsed)));
+  const cashSel = ccBuildCycleSelect("#overview-timeline-box", "cc-cash", cycle =>
+    ccDrawCash(cur, cycle, elapsed));
+  ccDrawFundraising = () => cashSel && ccDrawCash(cur, +cashSel.value, elapsed);
+
+  // A scope set before the controls existed (a committee page opened first)
+  // still has to hide the controls it does not support.
+  ccApplyScope();
 
   window.addEventListener("resize", () => {
     ["cc-donortype-chart", "cc-party-chart", "cc-cash-chart"].forEach(id => {
