@@ -9,8 +9,11 @@ happens after grouping so aliases below the old cutoff can still enter the
 leaderboard together. Unresolved contributions are retained, and the pooled
 miscellaneous cash category is combined across donor IDs.
 
-Existing contributor-type lists are re-keyed and re-summed; their state/month
-classification remains owned by process.py. All cache writes commit together.
+The Fundraising Pulse's "Biggest Donors" lists in activity_snapshot are
+rebuilt from the same rows, over each period's months, so they are netted and
+merged like every other donor ranking. Existing contributor-type lists are
+re-keyed and re-summed; their state/month classification remains owned by
+process.py. All cache writes commit together.
 Requires migration 014_donor_leaderboard.sql.
 
 Usage:  python scraper/refresh_donor_aggregates.py
@@ -195,6 +198,73 @@ def rebuild_filer_donors(cur) -> int:
     return cur.rowcount
 
 
+PULSE_TOP = 10
+PULSE_DETAILS = 10
+
+
+def _month_bounds(months: list[str]) -> tuple[str, str]:
+    """First and last day covered by a sorted list of "YYYY-MM" months."""
+    y, m = map(int, months[-1].split("-"))
+    after = f"{y + (m == 12):04d}-{m % 12 + 1:02d}-01"
+    return f"{months[0]}-01", after
+
+
+def pulse_donors(cur, start: str, before: str) -> list[dict]:
+    """Biggest donors with gifts dated in [start, before), across committees.
+
+    Each committee's figure is what it kept from the donor in the window: its
+    gifts less its refunds to that donor there. A refund issued now for a gift
+    made before the window has nothing to cancel inside it, so that committee
+    simply drops out instead of pulling the donor's other gifts down. ORESTAR's
+    pooled "Miscellaneous … $100 and under" lines are not donors and are left
+    out, as before; they come under more than one wording.
+    """
+    cur.execute("""
+      with scope as materialized (
+        -- One profile per filer ID, so no gift is counted twice.
+        select distinct on (ids.filer_id) ids.filer_id, fd.slug, fd.name
+        from filer_detail fd
+        cross join lateral jsonb_array_elements_text(
+          case when jsonb_typeof(fd.detail->'filer_ids') = 'array'
+                     and jsonb_array_length(fd.detail->'filer_ids') > 0
+               then fd.detail->'filer_ids' else jsonb_build_array(fd.filer_id) end
+        ) ids(filer_id)
+        order by ids.filer_id, (fd.filer_id = ids.filer_id) desc, fd.slug
+      )
+      select r.donor_key, min(r.donor_id), min(r.name), s.slug, min(s.name),
+             round(sum(r.amount), 2)
+      from donor_contribution_rows r join scope s on s.filer_id = r.filer_id
+      where r.tran_date >= %s and r.tran_date < %s and lower(r.name) not like 'miscellaneous %%' 
+      group by r.donor_key, s.slug
+      having sum(r.amount) > 0
+    """, (start, before))
+    donors: dict[str, dict] = {}
+    for key, did, name, slug, filer, amount in cur.fetchall():
+        d = donors.setdefault(key, {"name": name, "donor_id": did, "donor_key": key,
+                                    "total": 0.0, "details": []})
+        d["total"] += float(amount)
+        d["details"].append({"filer": filer, "slug": slug, "amount": float(amount)})
+    ranked = sorted(donors.values(), key=lambda d: (-d["total"], d["donor_key"]))[:PULSE_TOP]
+    for d in ranked:
+        d["total"] = round(d["total"], 2)
+        d["committees"] = len(d["details"])
+        d["details"] = sorted(d["details"], key=lambda x: -x["amount"])[:PULSE_DETAILS]
+    return ranked
+
+
+def rebuild_pulse_donors(cur, snapshot: dict) -> dict:
+    """Replace each Fundraising Pulse period's top_donors, over its own months."""
+    for key, period in (snapshot.get("periods") or {}).items():
+        months = sorted(period.get("months") or [])
+        if not months:
+            continue
+        start, before = _month_bounds(months)
+        period["top_donors"] = pulse_donors(cur, start, before)
+        log.info("  pulse %s (%s to %s): %d donors", key, start, before,
+                 len(period["top_donors"]))
+    return snapshot
+
+
 def stage_donor_rows(cur) -> None:
     """Read and normalize the source once for a consistent, bounded rebuild."""
     log.info("Staging normalized donor contributions…")
@@ -222,6 +292,14 @@ def main() -> int:
     top = build_top_donors(cur)
     _upsert(conn, cur, "top_donors", top)
     rebuild_filer_donors(cur)
+
+    log.info("Rebuilding the Fundraising Pulse's biggest donors…")
+    cur.execute("select data from dashboard_cache where key='activity_snapshot'")
+    row = cur.fetchone()
+    if row:
+        _upsert(conn, cur, "activity_snapshot", rebuild_pulse_donors(cur, row[0]))
+    else:
+        log.warning("activity_snapshot not in dashboard_cache — skipped")
 
     log.info("Re-keying by_contributor_type onto entities…")
     mapping = canonical_to_entity(cur)
