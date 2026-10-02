@@ -53,8 +53,20 @@ test('affected cached profiles and global rankings use freshly grouped data',asy
  const profile=await ctx.data.getFilerDetail('candidate');
  assert.equal(profile.top_donors[0].total,600);
  assert.equal(old.top_donors[0].total,100);
- assert.equal((await ctx.data.getBlob('top_donors')).all_time[0].total,600);
- assert.deepEqual(plain(calls.map(c=>c.params.p_filer_ids)),[['1'],null]);
+ assert.deepEqual(plain(calls.map(c=>c.params.p_filer_ids)),[['1']]);
+});
+test('the statewide donor table is read as stored, with newer merges folded in',async()=>{
+ const stored={all_time:[{name:'Acme',donor_id:'a',donor_key:'a',total:600},{name:'Old Acme',donor_id:'b',donor_key:'b',total:50},
+   {name:'Unrelated',donor_id:'x',donor_key:'x',total:400}],by_year:{2026:[{name:'Old Acme',donor_id:'b',donor_key:'b',total:50},{name:'Acme',donor_id:'a',donor_key:'a',total:20}]}};
+ const merges=[{donor_id:'b',canonical_id:'a',canonical_name:'Acme'}];
+ const ctx=vm.createContext({getSupabase:async()=>({from:table=>({select(){return this;},eq(){return this;},order(){return this;},
+   async range(){return {data:table==='donor_identity_map'?merges:[]};},
+   async single(){assert.equal(table,'dashboard_cache');return {data:{data:stored}};}}),
+   rpc:async()=>{throw Error('statewide ranking must not be recomputed');}})});
+ vm.runInContext(read('docs/lib/identity.js')+'\n'+read('docs/lib/data.js')+'\nthis.data=DL;',ctx);
+ const table=await ctx.data.getBlob('top_donors');
+ assert.deepEqual(plain(table.all_time.map(r=>[r.donor_id,r.total])),[['a',650],['x',400]]);
+ assert.deepEqual(plain(table.by_year[2026].map(r=>[r.donor_id,r.total])),[['a',70]]);
 });
 test('an unaffected profile keeps its cache rather than re-querying donor history',async()=>{
  const old={name:'Other',filer_ids:['2'],top_donors:[]};
