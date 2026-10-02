@@ -1,0 +1,36 @@
+{
+ "_source": "Oregon Legislature leadership records as summarised on each legislator's Wikipedia page and the Legislature's own biographies (checked 2026-10-02). Dates are the day the holder took the post. Committees were matched to ORESTAR by the user-supplied Historic_Speaker_and_President.xlsx for the presiding officers.",
+ "_rule": "A holder keeps the post until the next entry for that position starts. A month belongs to whoever held the post on its 15th; holders sharing a start date (the 2011-12 co-Speakers) share the post and both count. candidate null = the post was vacant. start null = already in office before the first cycle charted.",
+ "first_cycle": {
+  "Speaker of the House": 2010,
+  "Senate President": 2010,
+  "House Majority Leader": 2014,
+  "Senate Majority Leader": 2014
+ },
+ "tenures": [
+  { "position": "Speaker of the House", "candidate": "Jeff Merkley",  "slug": "merkley_jeff_friends_of",  "start": null },
+  { "position": "Speaker of the House", "candidate": "Dave Hunt",     "slug": "friends_of_dave_hunt",     "start": "2009-01-12" },
+  { "position": "Speaker of the House", "candidate": "Bruce Hanna",   "slug": "friends_of_bruce_hanna",   "start": "2011-01-10" },
+  { "position": "Speaker of the House", "candidate": "Arnie Roblan",  "slug": "friends_of_arnie_roblan",  "start": "2011-01-10" },
+  { "position": "Speaker of the House", "candidate": "Tina Kotek",    "slug": "friends_of_tina_kotek",    "start": "2013-01-14" },
+  { "position": "Speaker of the House", "candidate": "Dan Rayfield",  "slug": "friends_of_dan_rayfield",  "start": "2022-02-01" },
+  { "position": "Speaker of the House", "candidate": "Julie Fahey",   "slug": "friends_of_julie_fahey",   "start": "2024-03-07" },
+
+  { "position": "Senate President", "candidate": "Peter Courtney", "slug": "peter_courtney_for_state_senate", "start": null },
+  { "position": "Senate President", "candidate": "Rob Wagner",     "slug": "friends_of_rob_wagner",           "start": "2023-01-09" },
+
+  { "position": "House Majority Leader", "candidate": "Val Hoyle",            "slug": "friends_of_val_hoyle",           "start": "2013-01-14" },
+  { "position": "House Majority Leader", "candidate": "Jennifer Williamson",  "slug": "friends_of_jennifer_williamson",  "start": "2015-07-10" },
+  { "position": "House Majority Leader", "candidate": "Barbara Smith Warner", "slug": "team_bsw_barbara_smith_warner",  "start": "2019-07-19" },
+  { "position": "House Majority Leader", "candidate": "Julie Fahey",          "slug": "friends_of_julie_fahey",         "start": "2022-01-16" },
+  { "position": "House Majority Leader", "candidate": null,                   "slug": null,                             "start": "2024-03-07", "_note": "Fahey became Speaker; Bowman took over two weeks later" },
+  { "position": "House Majority Leader", "candidate": "Ben Bowman",           "slug": "friends_of_ben_bowman",          "start": "2024-03-21" },
+
+  { "position": "Senate Majority Leader", "candidate": "Diane Rosenbaum", "slug": "rosenbaum_for_senate_diane",   "start": null },
+  { "position": "Senate Majority Leader", "candidate": "Ginny Burdick",   "slug": "friends_of_ginny_burdick",     "start": "2015-09-28" },
+  { "position": "Senate Majority Leader", "candidate": "Rob Wagner",      "slug": "friends_of_rob_wagner",        "start": "2020-05-22" },
+  { "position": "Senate Majority Leader", "candidate": "Kate Lieber",     "slug": "kate_lieber_for_state_senate", "start": "2023-01-09" },
+  { "position": "Senate Majority Leader", "candidate": "Kathleen Taylor", "slug": "kathleen_taylor_for_oregon",   "start": "2024-07-15" },
+  { "position": "Senate Majority Leader", "candidate": "Kayse Jama",      "slug": "kayse_jama_for_oregon",        "start": "2024-11-16" }
+ ]
+}
