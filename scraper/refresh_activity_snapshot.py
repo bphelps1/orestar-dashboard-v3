@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import supabase_sync as s
 from generate_activity_snapshot import generate
+from refresh_donor_aggregates import rebuild_pulse_donors, stage_donor_rows
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -66,6 +67,12 @@ def main() -> int:
     log.info("latest month present in live data: %s", latest or "(none)")
 
     snapshot = generate(index=index, details=details)
+    # Biggest Donors comes from the netted, merged donor rows, as in the daily
+    # refresh — generate() alone would put back the gross per-type lists.
+    # Staged first: the live view groups every transaction before it can
+    # apply a date, which is minutes per period instead of seconds.
+    stage_donor_rows(cur)
+    rebuild_pulse_donors(cur, snapshot)
 
     # Guard: the whole point is that empty lanes are silent. Refuse to publish
     # a snapshot whose current window has no activity at all.

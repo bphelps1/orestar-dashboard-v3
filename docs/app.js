@@ -4072,6 +4072,18 @@ function renderPulseMomentum(data) {
   body.innerHTML = html || '<div class="pulse-entry-meta">No data</div>';
 }
 
+/**
+ * The committee page a pulse donor links to. A committee donor's ID is
+ * "c<filer_id>", which names its committee outright; the name lookup is the
+ * fallback for older snapshots, whose names carry an " (12345)" suffix.
+ */
+function pulseDonorFiler(e) {
+  const m = /^c(\d+)$/.exec(e.donor_id || "");
+  const f = m && (filerIndex || []).find(r => (r.filer_ids || [r.filer_id]).map(String).includes(m[1]));
+  if (f) return { slug: f.slug };
+  return (donorFilerMap && donorFilerMap[e.name.toLowerCase()]) || null;
+}
+
 function renderPulseDonors(data) {
   const body = document.getElementById("pulse-donors-body");
   if (!body) return;
@@ -4079,8 +4091,7 @@ function renderPulseDonors(data) {
   const entries = (data.top_donors || []).slice(0, PULSE_ROWS * 2);
   for (const e of entries) {
     const hasDetails = e.details && e.details.length > 1;
-    const donorKey = e.name.toLowerCase();
-    const filerLink = donorFilerMap && donorFilerMap[donorKey];
+    const filerLink = pulseDonorFiler(e);
     const nameHTML = filerLink
       ? `<a href="#" class="pulse-entry-name pulse-donor-link" onclick="event.preventDefault();selectFilerBySlug('${esc(filerLink.slug)}')" title="${esc(e.name)}">${esc(e.name)}</a>`
       : `<span class="pulse-entry-name" title="${esc(e.name)}">${esc(e.name)}</span>`;
