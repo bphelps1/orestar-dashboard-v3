@@ -38,6 +38,9 @@ def test_immediate_merges_across_reads_and_undo(stored):
             migration += '\n' + (ROOT/'supabase/migrations/027_stored_donor_identities.sql').read_text()
             migration += '\n' + (ROOT/'supabase/migrations/028_donor_identity_label_indexes.sql').read_text()
             migration += '\n' + (ROOT/'supabase/migrations/029_stored_donor_identity_labels.sql').read_text()
+        # 041 replaces the view, donor_leaderboard and donor_profile; every
+        # assertion below must hold with refunds netted.
+        migration += '\n' + (ROOT/'supabase/migrations/041_net_refunds_against_donors.sql').read_text()
         # All tables/functions/views/policies and grants stay in this schema.
         sql = (normalize + migration).replace('public.', schema + '.').replace('search_path = public', 'search_path = '+schema).replace('search_path=public', 'search_path='+schema)
         sql = sql.replace('pg_advisory_xact_lock(726027)', 'pg_advisory_xact_lock(726027000000 + pg_backend_pid())')
@@ -78,6 +81,24 @@ def test_immediate_merges_across_reads_and_undo(stored):
         assert rows[0]['donor_id']=='a' and rows[0]['total']==600
         q.execute("select sum(amount) from donor_contribution_rows where donor_id='a'")
         assert q.fetchone()[0]==600
+        # A refund comes off the merged donor it went back to, in every read.
+        # A donor refunded in full drops out of the ranking.
+        q.execute('savepoint refunds')
+        q.execute("insert into transactions(tran_id,donor_id,tran_type,sub_type,tran_date,filer_id,filer,amount,contributor_payee) values (5,'b','OD','Return or Refund of Contribution','2026-04-01','f','Candidate',150,'Acme Services'),(6,'x','OD','Return or Refund of Contribution','2026-04-01','f','Candidate',400,'Unrelated')")
+        q.execute("select donor_leaderboard(null,null,array['f'])")
+        board=q.fetchone()[0]
+        assert [(r['donor_id'],r['total']) for r in board['all_time']]==[('a',450)]
+        assert [(r['donor_id'],r['total']) for r in board['by_year']['2026']]==[('a',450)]
+        # A window holding only the refunds nets below zero: nobody ranks.
+        q.execute("select donor_leaderboard(date '2026-03-02',null,array['f'])")
+        assert q.fetchone()[0]=={'all_time':[],'by_year':{}}
+        q.execute("select sum(amount) from donor_contribution_rows where donor_id='a'")
+        assert q.fetchone()[0]==450
+        q.execute("select donor_profile('c')")
+        profile=q.fetchone()[0]
+        assert profile['top_recipients'][0]['total']==450 and profile['top_recipients'][0]['n']==3
+        assert [y['given'] for y in profile['by_year']]==[450]
+        q.execute('rollback to savepoint refunds')
         q.execute("select * from recommendation_first_gifts(array['a'],array['f'],date '2026-12-31')")
         first=q.fetchone(); assert first[0]=='a' and first[3]==200
         q.execute("select * from recommendation_first_gifts(array['b','a','b'],array['f'],date '2026-12-31')")

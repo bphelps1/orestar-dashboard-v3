@@ -48,6 +48,8 @@ MIGRATIONS = [
     "036_exact_date_recipients.sql",
     "037_transactions_autovacuum.sql",
     "039_daily_contributions.sql",
+    # After 021 and 024, whose view and functions it replaces.
+    "041_net_refunds_against_donors.sql",
     # Last on purpose: it patches the functions 027 and 029 define, so it has
     # to run after them on every apply.
     "032_merge_refresh_safe_deletes.sql",
