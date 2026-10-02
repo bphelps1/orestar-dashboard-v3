@@ -3,7 +3,7 @@
  *
  *   Who Funds Oregon Campaigns  → donor-type composition, this cycle vs a past one
  *   Who Funds Oregon's Parties  → party composition, same treatment
- *   Monthly Cash Flow           → cumulative raised, aligned by month-in-cycle
+ *   Monthly Cash Flow           → cumulative raised, cut at the same calendar day
  *
  * Each chart keeps its existing "Trend" view and gains a "Compare" view; the
  * originals are untouched so the filter toolbar keeps working as before.
@@ -171,6 +171,179 @@ function ccRenderCashFlow(elId, timeline, cycleA, cycleB, elapsed) {
   chart.resize();
 }
 
+// ── Cash flow, to the day ───────────────────────────────────────────────────
+
+const ccDailyRequests = new Map();
+
+/** "YYYY-MM-DD" for a local Date — toISOString would shift it to UTC. */
+const ccDay = d =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** Every day of the cycle ending in `year`, Dec 1 through Nov 30. */
+function ccCycleDays(year) {
+  const out = [];
+  for (const d = new Date(year - 2, 11, 1); d <= new Date(year, 10, 30); d.setDate(d.getDate() + 1)) {
+    out.push(ccDay(d));
+  }
+  return out;
+}
+
+/**
+ * {"YYYY-MM-DD": cash raised that day} for one cycle, from daily_contributions
+ * (migration 039). null when the function is not there yet, so the caller can
+ * fall back to the monthly chart instead of drawing zeros.
+ */
+function ccFetchDaily(year, filerIds) {
+  const key = `${year}|${(filerIds || []).join(",")}`;
+  if (!ccDailyRequests.has(key)) {
+    ccDailyRequests.set(key, (async () => {
+      try {
+        const sb = await getSupabase();
+        const { data, error } = await sb.rpc("daily_contributions", {
+          p_start: `${year - 2}-12-01`, p_end: `${year}-11-30`,
+          p_filer_ids: filerIds && filerIds.length ? filerIds : null,
+        });
+        if (error) throw error;
+        const out = {};
+        for (const r of data || []) out[r.d] = r.total || 0;
+        return out;
+      } catch (e) {
+        console.warn("[cyclecompare] daily totals unavailable:", e.message || e);
+        ccDailyRequests.delete(key);   // retry on the next pick
+        return null;
+      }
+    })());
+  }
+  return ccDailyRequests.get(key);
+}
+
+/**
+ * Cumulative raised in cycle B through the day that matches each of A's days.
+ *
+ * Days are matched by calendar date, not by day count: Oct 1, 2026 sets
+ * against Oct 1, 2024. A leap day in B is counted from Mar 1 on, and string
+ * comparison handles a Feb 29 in A with no partner in B.
+ */
+function ccCumulativeByDay(daily, daysA, shiftYears) {
+  const daysB = Object.keys(daily).sort();
+  const out = [];
+  let i = 0, run = 0;
+  for (const a of daysA) {
+    const b = `${+a.slice(0, 4) - shiftYears}${a.slice(4)}`;
+    while (i < daysB.length && daysB[i] <= b) run += daily[daysB[i++]];
+    out.push(run);
+  }
+  return out;
+}
+
+const ccShortDate = (d, withYear = true) => {
+  const [y, m, day] = d.split("-").map(Number);
+  return new Date(y, m - 1, day).toLocaleDateString("en-US",
+    withYear ? { month: "short", day: "numeric", year: "numeric" } : { month: "short", day: "numeric" });
+};
+
+function ccRenderCashFlowDaily(elId, dailyA, dailyB, cycleA, cycleB) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const inst = echarts.getInstanceByDom(el);
+  if (inst) inst.dispose();
+  const chart = echarts.init(el, null, { renderer: "svg" });
+
+  const days = ccCycleDays(cycleA);
+  const shift = cycleA - cycleB;
+  const today = ccDay(new Date());
+  const cut = days.filter(d => d <= today).length;        // days of A elapsed, today included
+
+  const aAll = ccCumulativeByDay(dailyA, days, 0);
+  const bAll = ccCumulativeByDay(dailyB, days, shift);
+  const aCum = aAll.map((v, i) => i < cut ? v : null);
+  const bCum = bAll.map((v, i) => i < cut ? v : null);
+
+  // The headline: both cycles cut at the same calendar day.
+  const last = days[Math.max(cut - 1, 0)];
+  const lastB = `${+last.slice(0, 4) - shift}${last.slice(4)}`;
+  const [a, b] = [aAll[Math.max(cut - 1, 0)] || 0, bAll[Math.max(cut - 1, 0)] || 0];
+  const pct = b > 0 ? ` (${a >= b ? "+" : "−"}${Math.abs(Math.round(100 * (a - b) / b))}%)` : "";
+  const headline = `Through ${ccShortDate(last)}: ${ccFmt$(a)}  ·  through ${ccShortDate(lastB)}: ${ccFmt$(b)}${pct}`;
+
+  const names = [`${cycleA} so far`, `${cycleB} same day`, `${cycleB} full cycle`];
+  chart.setOption({
+    grid: { left: 76, right: 24, top: 74, bottom: 36 },
+    legend: { top: 0, data: names },
+    graphic: [
+      { type: "text", left: 0, top: 26, silent: true,
+        style: { text: headline, fill: "#2d3748", fontSize: 13, fontWeight: 600 } },
+      // Recent gifts are still being reported; the past cycle's are all in.
+      { type: "text", left: 0, top: 46, silent: true,
+        style: { text: "Committees report gifts up to 30 days after receiving them (7 days in the last six weeks before an election), so the latest weeks of this cycle are still filling in.",
+                 fill: "#718096", fontSize: 11, width: Math.max(el.clientWidth - 8, 200), overflow: "truncate" } },
+    ],
+    tooltip: {
+      trigger: "axis",
+      formatter: ps => {
+        const d = days[ps[0].dataIndex];
+        const dB = `${+d.slice(0, 4) - shift}${d.slice(4)}`;
+        // This cycle first; the full-cycle line only past today, where it is
+        // the one past-cycle figure left (before that it repeats "same day").
+        const shown = ps.filter(p => p.value !== null && p.value !== undefined);
+        const sameDay = shown.some(p => p.seriesName === names[1]);
+        return [`${ccShortDate(d)} · ${ccShortDate(dB)}`].concat(shown
+          .filter(p => !(sameDay && p.seriesName === names[2]))
+          .sort((x, y) => names.indexOf(x.seriesName) - names.indexOf(y.seriesName))
+          .map(p => `${p.marker}${p.seriesName}: <b>${ccFmt$(p.value)}</b>`)).join("<br/>");
+      },
+    },
+    xAxis: {
+      type: "category", data: days, boundaryGap: false,
+      axisLabel: {
+        color: "#718096",
+        // Quarter starts only — 731 daily labels would be a smear.
+        interval: (i, v) => v.endsWith("-01") && [12, 3, 6, 9].includes(+v.slice(5, 7)),
+        formatter: v => new Date(+v.slice(0, 4), +v.slice(5, 7) - 1, 1)
+          .toLocaleDateString("en-US", { month: "short", year: "2-digit" }),
+      },
+      axisLine: { lineStyle: { color: "#e2e8f0" } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: "value", splitLine: { lineStyle: { color: "#edf2f7" } },
+      axisLabel: { color: "#718096",
+        formatter: v => v >= 1e6 ? `$${(v / 1e6).toFixed(0)}M`
+                            : v > 0 ? `$${Math.round(v / 1e3)}K` : "$0" },
+    },
+    series: [
+      // Faded first so the like-for-like pair reads on top of it.
+      { name: names[2], type: "line", data: bAll, showSymbol: false,
+        lineStyle: { width: 2, color: CC_PALETTE[1], opacity: 0.28 },
+        itemStyle: { color: CC_PALETTE[1], opacity: 0.28 } },
+      { name: names[1], type: "line", data: bCum, showSymbol: false,
+        lineStyle: { width: 2, color: CC_PALETTE[1] }, itemStyle: { color: CC_PALETTE[1] } },
+      { name: names[0], type: "line", data: aCum, showSymbol: false,
+        lineStyle: { width: 2, color: CC_PALETTE[0] }, itemStyle: { color: CC_PALETTE[0] },
+        // Mark where both lines stop, so the comparison point is explicit.
+        markPoint: cut ? { symbol: "circle", symbolSize: 9, label: { show: false },
+          itemStyle: { color: CC_PALETTE[0], borderColor: "#fff", borderWidth: 2 },
+          data: [{ coord: [cut - 1, a] }] } : undefined },
+    ],
+  });
+  chart.resize();
+}
+
+let ccCashPick = 0;
+
+/** Draw the to-the-day comparison, or the monthly one if daily totals are unavailable. */
+async function ccDrawCash(cur, cycle, elapsed) {
+  const pick = ++ccCashPick;
+  const ids = ccScope.mode === "filer"
+    ? (ccScope.profile.filer_ids && ccScope.profile.filer_ids.length
+        ? ccScope.profile.filer_ids : [ccScope.profile.filer_id]).filter(Boolean).map(String)
+    : null;
+  const [a, b] = await Promise.all([ccFetchDaily(cur, ids), ccFetchDaily(cycle, ids)]);
+  if (pick !== ccCashPick) return;                         // a later pick wins
+  if (a && b) ccRenderCashFlowDaily("cc-cash-chart", a, b, cur, cycle);
+  else ccRenderCashFlow("cc-cash-chart", ccTimeline(), cur, cycle, elapsed);
+}
+
 // ── Wiring ──────────────────────────────────────────────────────────────────
 
 let ccWired = false;
@@ -296,7 +469,7 @@ function initCycleCompare() {
 
   ccBuildControl("#overview-timeline-box", "cc-cash", cycle =>
     swap("chart-timeline", "cc-cash-chart", cycle, () =>
-      ccRenderCashFlow("cc-cash-chart", ccTimeline(), cur, cycle, elapsed)));
+      ccDrawCash(cur, cycle, elapsed)));
 
   window.addEventListener("resize", () => {
     ["cc-donortype-chart", "cc-party-chart", "cc-cash-chart"].forEach(id => {
