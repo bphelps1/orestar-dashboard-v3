@@ -120,13 +120,16 @@ async function loadLeadership() {
  * (candidate null) comes back as [].
  */
 function holdersOn(tenures, position, day) {
+  // counts_from moves a successor's start back to the day the outgoing holder
+  // announced a run for another office (see the file's _rule).
+  const from = t => t.counts_from || t.start;
   let best = undefined;
   for (const t of tenures) {
-    if (t.position !== position || (t.start !== null && t.start > day)) continue;
-    if (best === undefined || (t.start || "") > (best || "")) best = t.start;
+    if (t.position !== position || (from(t) !== null && from(t) > day)) continue;
+    if (best === undefined || (from(t) || "") > (best || "")) best = from(t);
   }
   if (best === undefined) return [];
-  return tenures.filter(t => t.position === position && t.start === best && t.candidate);
+  return tenures.filter(t => t.position === position && from(t) === best && t.candidate);
 }
 
 /**
@@ -135,8 +138,8 @@ function holdersOn(tenures, position, day) {
  * Leaders change mid-cycle often (the Senate had three majority leaders in
  * 2024), so a cycle is not credited to one person. Each month goes to whoever
  * held the post on its 15th, and only that holder's money for that month
- * counts. Money raised before taking the post, or for a statewide run after
- * leaving it, stays out.
+ * counts. Money raised before taking the post, or for a run for another
+ * office (during the tenure or after it), stays out.
  */
 function tenureCycle(tenures, position, year, timelines) {
   const { start, end } = cycleWindow(year);
@@ -148,7 +151,7 @@ function tenureCycle(tenures, position, year, timelines) {
     for (const h of holdersOn(tenures, position, `${month}-15`)) {
       const amt = (timelines[h.slug] || [])
         .filter(e => e.month === month).reduce((a, e) => a + (e.contributions || 0), 0);
-      const p = parts.get(h.candidate) || { candidate: h.candidate, start: h.start, months: 0, amount: 0 };
+      const p = parts.get(h.candidate) || { candidate: h.candidate, start: h.counts_from || h.start, months: 0, amount: 0 };
       p.months += 1; p.amount += amt; total += amt;
       parts.set(h.candidate, p);
     }
