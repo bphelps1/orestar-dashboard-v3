@@ -2,7 +2,9 @@
 refresh_donor_aggregates.py — rebuild normalized donor tables from Postgres.
 
 Global and per-committee donor tables use donor_contribution_rows, the same
-cash-only, normalized grouping as the exact-date donor_leaderboard RPC. Ranking
+cash-only, normalized grouping as the exact-date donor_leaderboard RPC, with
+refunds of contributions netted against the donor (migration 041). A donor or
+donor-year that nets to zero or less is left out of the lists. Ranking
 happens after grouping so aliases below the old cutoff can still enter the
 leaderboard together. Unresolved contributions are retained, and the pooled
 miscellaneous cash category is combined across donor IDs.
@@ -46,6 +48,8 @@ def build_top_donors(cur) -> dict:
           from donor_contribution_rows
           group by grouping sets ((donor_key),
             (donor_key, extract(year from tran_date)::int))
+          -- Refunds are negative rows: a donor refunded in full kept nothing.
+          having sum(amount) > 0
         ), ranked as (
           select *, row_number() over (partition by all_years, yr
             order by total desc nulls last, donor_key) as rn from totals
@@ -163,6 +167,7 @@ def rebuild_filer_donors(cur) -> int:
         from donor_contribution_rows r join scope s on s.filer_id = r.filer_id
         group by grouping sets ((s.slug, r.donor_key),
           (s.slug, r.donor_key, extract(year from r.tran_date)::int))
+        having sum(r.amount) > 0
       ), ranked as (
         select *, row_number() over (partition by slug, all_years, yr
           order by total desc nulls last, donor_key) as rn from totals

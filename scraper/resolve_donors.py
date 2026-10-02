@@ -703,8 +703,15 @@ def write_back(conn, df, assign, donors, aliases):
                -- separately so it is excluded here too. Without this,
                -- donors.total_given disagreed with the Donors tab by exactly
                -- a donor's in-kind giving (SEIU 503: $2.39M).
-               sum(amount) filter (where tran_type = 'C'
-                     and coalesce(sub_type,'') <> 'In-Kind Contribution')  as given,
+               -- Refunds of contributions are netted against the donor, as
+               -- in donor_contribution_rows (041): a returned check was not
+               -- given. Null when there were no gifts, as before.
+               case when count(*) filter (where tran_type = 'C'
+                     and coalesce(sub_type,'') <> 'In-Kind Contribution') > 0
+                    then greatest(coalesce(sum(amount) filter (where tran_type = 'C'
+                     and coalesce(sub_type,'') <> 'In-Kind Contribution'), 0)
+                     - coalesce(sum(amount) filter (where sub_type =
+                       'Return or Refund of Contribution'), 0), 0) end  as given,
                sum(amount) filter (where tran_type = 'C'
                      and sub_type = 'In-Kind Contribution')                as given_inkind,
                sum(amount) filter (where tran_type = 'E')          as received,
