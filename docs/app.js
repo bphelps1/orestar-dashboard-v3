@@ -2935,12 +2935,13 @@ function cohIndicatorHTML(profile) {
 /**
  * Show only the tiles that still mean something under the current filter.
  *
- * "Compared with past cycles" charts fixed sets of statewide committees, so it
- * never describes a filtered selection. The district map is kept only when the
- * filter is one committee that is actually on this cycle's ballot — then it is
- * lit on that district, which is more use than the statewide default. Anything
- * else (a PAC, a former officeholder, several committees at once) hides it,
- * since a map with nothing to point at is just noise.
+ * "Compared with past cycles" and the caucus-PAC donors chart fixed sets of
+ * statewide committees, so they never describe a filtered selection. The
+ * district map is kept only when the filter is one committee that is actually
+ * on this cycle's ballot — then it is lit on that district, which is more use
+ * than the statewide default. Anything else (a PAC, a former officeholder,
+ * several committees at once) hides it, since a map with nothing to point at
+ * is just noise.
  *
  * mode: "statewide" | "filer" | "multi"
  */
@@ -2948,6 +2949,8 @@ function setOverviewTiles(mode, profile) {
   // Fixed sets of statewide committees — never a description of a selection.
   const past = document.getElementById("past-cycles-box");
   if (past) past.hidden = mode !== "statewide";
+  const caucus = document.getElementById("caucus-donors-box");
+  if (caucus) caucus.hidden = mode !== "statewide";
 
   const mapBox = document.getElementById("legislative-races-box");
   if (!mapBox) return;
@@ -4166,6 +4169,7 @@ async function loadCampaignPulse() {
     activitySnapshot = await DL.getBlob("activity_snapshot");
     // Overview extras: historical comparison, then the district map below it.
     if (typeof initCompare === "function") { try { initCompare(); } catch (e) { console.warn("[compare]", e); } }
+    if (typeof initCaucusDonors === "function") initCaucusDonors().catch(e => console.warn("[caucus donors]", e));
     if (typeof initRaceMap === "function") { try { initRaceMap(activitySnapshot); } catch (e) { console.warn("[racemap]", e); } }
     await ensureDonorFilerMap();
     const el = document.getElementById("campaign-pulse");

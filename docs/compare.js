@@ -3,8 +3,9 @@
  *
  * Compares the marquee races against prior cycles:
  *   • Governor, by party
- *   • Speaker of the House / Senate President (data/leadership_history.json)
- *   • Future PAC, House Builders and SDLF
+ *   • Speaker, Senate President and both Majority Leaders, split by tenure
+ *     (assets/leadership_tenures.json)
+ *   • the four legislative caucus PACs
  *
  * A cycle runs Dec of the pre-election year → Nov of the election year, the
  * same window the Overview cycle presets use, so the two agree.
@@ -23,8 +24,8 @@ const CMP_COLORS = {
   Other: "#eda100",        // slot 4
   "Speaker of the House": "#2a78d6",
   "Senate President": "#1baf7a",   // slot 3
-  "Future PAC, House Builders": "#2a78d6",
-  "SDLF": "#eb6834",       // slot 2
+  "House Majority Leader": "#eb6834",    // slot 2
+  "Senate Majority Leader": "#eda100",   // slot 4
 };
 
 // CPI-U, annual average, US city average (1982-84 = 100).
@@ -42,7 +43,7 @@ const CPI_BASE_YEAR = 2024;          // "real" figures are in 2024 dollars
 let cmpChart = null;
 let cmpMode = "nominal";             // 'nominal' | 'real'
 let cmpSeriesSet = "governor";       // 'governor' | 'leadership' | 'caucus'
-let leadershipHistory = null;
+let leadershipTenures = null;
 
 const cmpFmt$ = v => "$" + Math.round(v).toLocaleString("en-US");
 
@@ -81,59 +82,97 @@ async function fetchTimelines(slugs) {
   return out;
 }
 
-/** The cycle currently under way (same rule as the Overview cycle presets). */
-function currentCycleYear() {
-  const now = new Date();
-  let y = now.getFullYear();
-  if (y % 2 !== 0) y += 1;
-  else if (now.getMonth() >= 11) y += 2;
-  return y;
+const LEADER_POSTS = [
+  "Speaker of the House", "House Majority Leader",
+  "Senate President", "Senate Majority Leader",
+];
+
+/**
+ * Dated holders of the four leadership posts (assets/leadership_tenures.json).
+ *
+ * The file is the record; the filer index is only a tripwire. filer_index
+ * carries leadership_role from the weekly leadership refresh, so when someone
+ * new holds a post the file does not know about yet, say so in the console
+ * instead of guessing when they took over.
+ */
+async function loadLeadership() {
+  if (leadershipTenures) return leadershipTenures;
+  try {
+    const r = await fetch("assets/leadership_tenures.json");
+    leadershipTenures = r.ok ? await r.json() : { tenures: [] };
+  } catch { leadershipTenures = { tenures: [] }; }
+
+  const today = new Date().toISOString().slice(0, 10);
+  for (const f of (typeof filerIndex !== "undefined" && filerIndex) || []) {
+    const pos = LEADER_POSTS.find(p => p.toLowerCase() === (f.leadership_role || "").trim().toLowerCase());
+    if (!pos) continue;
+    const now = holdersOn(leadershipTenures.tenures, pos, today);
+    if (!now.some(t => t.slug === f.slug)) {
+      console.warn(`[compare] ${f.name} now holds ${pos}; add the date to assets/leadership_tenures.json`);
+    }
+  }
+  return leadershipTenures;
 }
 
 /**
- * Current Speaker / Senate President, read live from the filer index.
- *
- * filer_index carries leadership_role, populated from data/leadership_roles.json
- * and refreshed weekly by leadership-refresh.yml — so when the Speaker or
- * President changes, this chart follows without anyone editing a file. The
- * supplied spreadsheet only runs through 2024, which is why the current cycle
- * has to come from live data rather than the history.
+ * Who held `position` on `day` ("YYYY-MM-DD"): every entry sharing the latest
+ * start on or before it, so co-Speakers both come back. A vacancy entry
+ * (candidate null) comes back as [].
  */
-function currentLeadersFromIndex(cycle) {
-  const WANT = {
-    "speaker of the house": "Speaker of the House",
-    "senate president": "Senate President",
-  };
-  const out = [];
-  for (const f of (typeof filerIndex !== "undefined" && filerIndex) || []) {
-    const pos = WANT[(f.leadership_role || "").trim().toLowerCase()];
-    if (!pos || !f.slug) continue;
-    out.push({
-      cycle, position: pos,
-      candidate: f.candidate_name || f.name,
-      slug: f.slug, committee: f.name, match: "live",
-    });
+function holdersOn(tenures, position, day) {
+  // counts_from moves a successor's start back to the day the outgoing holder
+  // announced a run for another office (see the file's _rule).
+  const from = t => t.counts_from || t.start;
+  let best = undefined;
+  for (const t of tenures) {
+    if (t.position !== position || (from(t) !== null && from(t) > day)) continue;
+    if (best === undefined || (from(t) || "") > (best || "")) best = from(t);
   }
-  return out;
+  if (best === undefined) return [];
+  return tenures.filter(t => t.position === position && from(t) === best && t.candidate);
 }
 
-async function loadLeadership() {
-  if (leadershipHistory) return leadershipHistory;
-  try {
-    // Served from docs/assets — data/ at the repo root is not web-served.
-    const r = await fetch("assets/leadership_history.json");
-    leadershipHistory = r.ok ? await r.json() : { leaders: [] };
-  } catch { leadershipHistory = { leaders: [] }; }
-
-  // Fold in whoever currently holds these roles, for any cycle the historical
-  // file doesn't cover yet.
-  const cycle = currentCycleYear();
-  const have = new Set(leadershipHistory.leaders
-    .filter(l => l.cycle === cycle).map(l => l.position));
-  for (const l of currentLeadersFromIndex(cycle)) {
-    if (!have.has(l.position)) leadershipHistory.leaders.push(l);
+/**
+ * One cycle of a post: {total, parts:[{candidate, start, months, amount}]}.
+ *
+ * Leaders change mid-cycle often (the Senate had three majority leaders in
+ * 2024), so a cycle is not credited to one person. Each month goes to whoever
+ * held the post on its 15th, and only that holder's money for that month
+ * counts. Money raised before taking the post, or for a run for another
+ * office (during the tenure or after it), stays out.
+ */
+function tenureCycle(tenures, position, year, timelines) {
+  const { start, end } = cycleWindow(year);
+  const parts = new Map();
+  let total = 0;
+  for (let y = +start.slice(0, 4), m = +start.slice(5); ; ) {
+    const month = `${y}-${String(m).padStart(2, "0")}`;
+    if (month > end) break;
+    for (const h of holdersOn(tenures, position, `${month}-15`)) {
+      const amt = (timelines[h.slug] || [])
+        .filter(e => e.month === month).reduce((a, e) => a + (e.contributions || 0), 0);
+      const p = parts.get(h.candidate) || { candidate: h.candidate, start: h.counts_from || h.start, months: 0, amount: 0 };
+      p.months += 1; p.amount += amt; total += amt;
+      parts.set(h.candidate, p);
+    }
+    if (++m > 12) { m = 1; y += 1; }
   }
-  return leadershipHistory;
+  return { total, parts: [...parts.values()] };
+}
+
+/**
+ * "Kate Lieber 18 mo, $256,225 → Kathleen Taylor 5 mo, $347,768". Successive
+ * holders are joined by an arrow; co-holders, who share a start, by "&".
+ */
+function tenureLabel(parts, year) {
+  if (parts.length === 1) return parts[0].candidate;
+  const out = [];
+  parts.forEach((p, i) => {
+    const text = `${p.candidate} ${p.months} mo, ${cmpFmt$(deflate(p.amount, year))}`;
+    if (i && p.start === parts[i - 1].start) out[out.length - 1] += ` & ${text}`;
+    else out.push(text);
+  });
+  return out.join(" → ");
 }
 
 /** Build {cycles:[], series:[{name, color, data:[]}]} for the active toggle. */
@@ -166,40 +205,40 @@ async function buildCompareSeries() {
   }
 
   if (cmpSeriesSet === "leadership") {
-    const lh = await loadLeadership();
-    const slugs = [...new Set(lh.leaders.filter(l => l.slug).map(l => l.slug))];
-    const tl = await fetchTimelines(slugs);
-    const positions = ["Speaker of the House", "Senate President"];
+    const lt = await loadLeadership();
+    const tl = await fetchTimelines([...new Set(lt.tenures.filter(t => t.slug).map(t => t.slug))]);
+    // Each chamber's pair sits together in the legend; dashed = majority leader.
     return {
       cycles,
-      series: positions.map(pos => ({
-        name: pos,
-        color: CMP_COLORS[pos],
-        // Co-Speakers (2012) are summed — the source lists both holders.
-        data: cycles.map(y => Math.round(deflate(
-          lh.leaders.filter(l => l.cycle === y && l.position === pos && l.slug)
-                    .reduce((a, l) => a + sumCycle(tl[l.slug], y), 0), y))),
-        labels: cycles.map(y =>
-          lh.leaders.filter(l => l.cycle === y && l.position === pos)
-                    .map(l => l.candidate).join(" & ")),
-      })),
+      series: LEADER_POSTS.map(pos => {
+        const first = (lt.first_cycle || {})[pos] || 0;
+        const per = cycles.map(y => y < first ? null : tenureCycle(lt.tenures, pos, y, tl));
+        return {
+          name: pos,
+          color: CMP_COLORS[pos],
+          dashed: pos.endsWith("Majority Leader"),
+          // null, not 0: before the history starts there is nothing to plot.
+          data: per.map((c, i) => c ? Math.round(deflate(c.total, cycles[i])) : null),
+          labels: per.map((c, i) => c ? tenureLabel(c.parts, cycles[i]) : ""),
+        };
+      }),
     };
   }
 
-  // Caucus committees
-  // Match on the full name: a loose prefix also caught "Future Portland PAC".
-  const wanted = ["future pac, house builders", "sdlf"];
-  const rows = (filerIndex || []).filter(f => {
-    const n = (f.name || "").toLowerCase();
-    return wanted.some(w => n === w || n.startsWith(w));
-  });
-  const tl = await fetchTimelines(rows.map(f => f.slug));
+  // Caucus PACs: one series per caucus, following it across committees (the
+  // House Republicans have used three). CAUCUS_PACS lives in caucusdonors.js.
+  // Party carries the hue; Senate is dashed, matching the Leadership view.
+  const slugs = [...new Set(CAUCUS_PACS.flatMap(c => cycles.map(y => c.committee(y))))];
+  const tl = await fetchTimelines(slugs);
+  const name = slug => ((filerIndex || []).find(f => f.slug === slug) || {}).name || slug;
   return {
     cycles,
-    series: rows.slice(0, 4).map((f, i) => ({
-      name: f.name,
-      color: CMP_COLORS[f.name] || ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"][i],
-      data: cycles.map(y => Math.round(deflate(sumCycle(tl[f.slug], y), y))),
+    series: CAUCUS_PACS.map(c => ({
+      name: c.caucus,
+      color: CAUCUS_COLOR[c.party],
+      dashed: c.caucus.startsWith("Senate"),
+      data: cycles.map(y => Math.round(deflate(sumCycle(tl[c.committee(y)], y), y))),
+      labels: cycles.map(y => name(c.committee(y))),
     })),
   };
 }
@@ -214,7 +253,9 @@ async function renderCompareChart() {
   cmpChart.setOption({
     grid: { left: 76, right: 24, top: 28, bottom: 40 },
     // Legend always present for >= 2 series, so identity is never colour-alone
-    legend: { data: series.map(s => s.name), top: 0, icon: "roundRect",
+    // No fixed icon: each entry draws its series' own line, so a dashed series
+    // is dashed in the legend too, and same-hue pairs stay apart there.
+    legend: { data: series.map(s => s.name), top: 0, itemWidth: 28,
               textStyle: { color: "#4a5568" } },
     xAxis: {
       type: "category", data: cycles.map(String),
@@ -231,13 +272,22 @@ async function renderCompareChart() {
     },
     tooltip: {
       trigger: "axis",
-      valueFormatter: cmpFmt$,
-      extraCssText: "max-width:320px;white-space:normal",
+      extraCssText: "max-width:360px;white-space:normal",
+      // Name who held the post, so a mid-cycle hand-off is visible on hover.
+      formatter: ps => [ps[0] && ps[0].axisValue].concat(ps
+        .filter(p => p.value !== null && p.value !== undefined)
+        .map(p => {
+          const s = series[p.seriesIndex];
+          const who = s.labels && s.labels[p.dataIndex];
+          return `${p.marker}${p.seriesName}: <b>${cmpFmt$(p.value)}</b>` +
+            (who ? `<br/><span style="color:#718096;font-size:11px;margin-left:14px">${esc(who)}</span>` : "");
+        })).join("<br/>"),
     },
     series: series.map(s => ({
       name: s.name, type: "line", data: s.data,
       smooth: false,
-      lineStyle: { width: 2, color: s.color },       // 2px lines per spec
+      // Dashed = majority leader / Senate caucus, so pairs read apart without colour.
+      lineStyle: { width: 2, color: s.color, type: s.dashed ? "dashed" : "solid" },  // 2px lines per spec
       itemStyle: { color: s.color, borderColor: "#fff", borderWidth: 2 },
       symbolSize: 9,                                  // >= 8px markers
       emphasis: { focus: "series" },
@@ -256,6 +306,8 @@ function initCompare() {
     if (!b) return;
     cmpSeriesSet = b.dataset.set;
     setBox.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+    const setNote = document.getElementById("cmp-set-note");
+    if (setNote) setNote.hidden = cmpSeriesSet !== "leadership";
     renderCompareChart();
   });
 
