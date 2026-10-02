@@ -156,6 +156,18 @@
       <div class="races-list" id="races-list"></div>
     </div>
 
+    <!-- ── Caucus PACs: top donors ─────────────────────────────────────── -->
+    <div class="chart-area chart-area-wide caucus-box" id="caucus-donors-box">
+      <div class="cmp-head">
+        <h2>Top donors to the caucus PACs</h2>
+        <div class="cmp-controls">
+          <select id="caucus-donors-cycle" class="cc-select" aria-label="Cycle"></select>
+        </div>
+      </div>
+      <p class="cmp-note" id="caucus-donors-note">Cash contributions this cycle</p>
+      <div class="caucus-grid" id="caucus-donors-grid"><p class="rc-empty">Loading…</p></div>
+    </div>
+
     <!-- Collapsible Account Summary Details -->
     <div class="chart-area chart-area-wide cmp-box" id="past-cycles-box">
       <div class="cmp-head">
@@ -173,6 +185,7 @@
         </div>
       </div>
       <p class="cmp-note" id="cmp-note">Nominal dollars as reported</p>
+      <p class="cmp-note" id="cmp-set-note" hidden>Majority leaders: when the post changed hands mid-cycle, each holder counts only for the months they held it.</p>
       <div id="cmp-chart" class="echart-container"></div>
     </div>
 
@@ -314,6 +327,7 @@
 </footer>
 
 <script src="compare.js"></script>
+<script src="caucusdonors.js"></script>
 <script src="racemap.js"></script>
 <script src="cyclecompare.js"></script>
 <script src="app.js"></script>
