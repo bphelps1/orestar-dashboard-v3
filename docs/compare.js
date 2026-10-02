@@ -177,7 +177,8 @@ function tenureLabel(parts, year) {
 
 /** Build {cycles:[], series:[{name, color, data:[]}]} for the active toggle. */
 async function buildCompareSeries() {
-  const cycles = [2010, 2012, 2014, 2016, 2018, 2020, 2022, 2024, 2026];
+  // From 2014: the first cycle every leadership post has a dated holder for.
+  const cycles = [2014, 2016, 2018, 2020, 2022, 2024, 2026];
 
   if (cmpSeriesSet === "governor") {
     // Governor candidates by party, per cycle, from the filer index.
