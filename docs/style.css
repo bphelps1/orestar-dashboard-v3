@@ -2307,8 +2307,11 @@ footer a:hover { color: var(--color-accent); }
 @media (max-width: 760px) { .caucus-grid { grid-template-columns: 1fr; } }
 .caucus-panel { border: 1px solid #e2e8f0; border-radius: 10px; padding: .8rem .9rem; min-width: 0; }
 .caucus-title { margin: 0; font-size: .95rem; display: flex; align-items: center; gap: .35rem; }
+.caucus-head { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
+.caucus-raised { font-size: .82rem; color: #718096; font-variant-numeric: tabular-nums; }
+.caucus-raised b { color: #2d3748; font-size: .95rem; }
 .caucus-title .rc-party { margin-left: 0; }
-.caucus-cmte { font-size: .76rem; margin: .1rem 0 .55rem; }
+.caucus-cmte { font-size: .76rem; margin: .1rem 0 .55rem; color: #718096; }
 .caucus-cmte a { color: #718096; }
 .caucus-list { list-style: none; margin: 0; padding: 0; }
 .caucus-row {

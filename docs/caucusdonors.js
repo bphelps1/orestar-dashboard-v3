@@ -50,9 +50,13 @@ function caucusDonorSlug(key) {
   return f ? f.slug : null;
 }
 
-/** [{caucus, party, slug, name, donors:[{name,total,slug}]}] for one cycle. */
+/** [{caucus, party, slug, name, raised, donors:[{name,total,slug}]}] for one cycle. */
 async function caucusLoad(year) {
   const { start, end } = caucusWindow(year);
+  // The cycle total comes from the committee's monthly timeline, the same
+  // figure "Compared with past cycles" plots, so the two never disagree.
+  // (Summing the donor list instead would miss unitemized small gifts.)
+  const timelines = await fetchTimelines(CAUCUS_PACS.map(c => c.committee(year)));
   return Promise.all(CAUCUS_PACS.map(async c => {
     const slug = c.committee(year);
     const filer = caucusFiler(slug);
@@ -66,7 +70,8 @@ async function caucusLoad(year) {
         }));
       } catch (e) { console.warn("[caucus donors]", slug, e.message); }
     }
-    return { ...c, slug, name: filer ? filer.name : slug, donors };
+    const raised = sumCycle(timelines[slug], year);
+    return { ...c, slug, name: filer ? filer.name : slug, raised, donors };
   }));
 }
 
@@ -89,9 +94,15 @@ function caucusRender(panels, year) {
         <span class="caucus-amt">${$(d.total)}</span>
       </li>`;
     }).join("") : `<li class="caucus-empty">No contributions this cycle</li>`;
+    const top = p.donors.reduce((a, d) => a + d.total, 0);
+    const share = p.raised > 0 && top > 0
+      ? ` · top ${p.donors.length} gave ${Math.round(100 * top / p.raised)}%` : "";
     return `<div class="caucus-panel">
-      <h3 class="caucus-title"><span class="rc-party ${p.party}">${p.party}</span> ${esc(p.caucus)}</h3>
-      <div class="caucus-cmte"><a href="#" class="caucus-donor-link" data-slug="${esc(p.slug)}">${esc(p.name)}</a></div>
+      <div class="caucus-head">
+        <h3 class="caucus-title"><span class="rc-party ${p.party}">${p.party}</span> ${esc(p.caucus)}</h3>
+        <div class="caucus-raised"><b>${$(p.raised)}</b> raised</div>
+      </div>
+      <div class="caucus-cmte"><a href="#" class="caucus-donor-link" data-slug="${esc(p.slug)}">${esc(p.name)}</a>${share}</div>
       <ol class="caucus-list">${rows}</ol>
     </div>`;
   }).join("");
