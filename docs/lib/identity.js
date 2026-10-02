@@ -105,5 +105,24 @@ const ID = (() => {
       [year, Array.isArray(items) ? mergeRows(items, map, names) : items]));
   }
 
-  return { loadMap, hasMerges, affectsFilers, members, rekeyBlob, rekeyDonorYears };
+  /**
+   * The statewide donor table ({all_time, by_year}), with merges saved since
+   * its last rebuild applied. refresh_donor_aggregates.py rebuilds it daily
+   * with every merge saved by then, so this only folds in the newest ones.
+   */
+  async function rekeyDonorTable(table) {
+    const map = await loadMap();
+    if (!map.size || !table) return table;
+    const years = Object.entries(table.by_year || {});
+    const rows = [...(table.all_time || []), ...years.flatMap(([, items]) => items || [])];
+    const names = rows.some(i => !i.donor_id && !i.donor_key) ? await loadLabels() : new Map();
+    return {
+      ...table,
+      all_time: mergeRows(table.all_time || [], map, names),
+      by_year: Object.fromEntries(years.map(([year, items]) =>
+        [year, Array.isArray(items) ? mergeRows(items, map, names) : items])),
+    };
+  }
+
+  return { loadMap, hasMerges, affectsFilers, members, rekeyBlob, rekeyDonorYears, rekeyDonorTable };
 })();

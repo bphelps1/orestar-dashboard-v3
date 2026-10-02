@@ -22,7 +22,6 @@ const DL = (() => {
   /** Fetch a whole-dashboard aggregate blob by key from dashboard_cache. */
   async function getBlob(key) {
     if (typeof DN !== "undefined") await DN.load();
-    if (key === "top_donors" && typeof ID !== "undefined" && await ID.hasMerges()) return getDonors();
     const sb = await getSupabase();
     const { data, error } = await sb
       .from("dashboard_cache")
@@ -30,7 +29,12 @@ const DL = (() => {
       .eq("key", key)
       .single();
     if (error) throw new Error(`Failed to load '${key}': ${error.message}`);
-    return typeof ID !== "undefined" && ["by_contributor_type", "activity_snapshot"].includes(key)
+    if (typeof ID === "undefined") return names(data.data);
+    // The statewide donor table is read as stored, not re-ranked: ranking
+    // every donor from all transactions takes ~30 s, the RPC's limit, and the
+    // stored table is the same ranking, rebuilt daily with merges and refunds.
+    if (key === "top_donors") return names(await ID.rekeyDonorTable(data.data));
+    return ["by_contributor_type", "activity_snapshot"].includes(key)
       ? names(await ID.rekeyBlob(data.data)) : names(data.data);
   }
 
