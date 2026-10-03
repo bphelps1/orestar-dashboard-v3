@@ -14,7 +14,16 @@
 "use strict";
 
 // ── ECharts — no global defaults needed (configured per-instance) ────────────
-const IS_MOBILE = window.innerWidth <= 768;
+// Phone layout for charts: smaller type, tap tooltips, legends below. Read
+// live, not once: a page loaded in landscape and turned to portrait kept its
+// desktop legends and margins on a narrow screen. Crossing the breakpoint
+// redraws the open tab from the data it already has.
+const MOBILE_QUERY = window.matchMedia("(max-width: 768px)");
+let IS_MOBILE = MOBILE_QUERY.matches;
+MOBILE_QUERY.addEventListener("change", e => {
+  IS_MOBILE = e.matches;
+  renderActiveTab();
+});
 
 /** Tooltip position: constrain horizontally within chart, free vertically */
 function tooltipPosition(point, params, dom, rect, size) {
@@ -31,13 +40,7 @@ function initEChart(el) {
   return echarts.init(el, null, { renderer: 'svg' });
 }
 
-/** Resize all active ECharts instances */
-window.addEventListener('resize', () => {
-  document.querySelectorAll('.echart-container, .echart-container-tall').forEach(el => {
-    const instance = echarts.getInstanceByDom(el);
-    if (instance) instance.resize();
-  });
-});
+// Chart sizing (resize on rotation, reveal, etc.) is lib/charts.js's job.
 
 const PALETTE = [
   "#3182ce", "#e53e3e", "#38a169", "#d69e2e", "#805ad5",
