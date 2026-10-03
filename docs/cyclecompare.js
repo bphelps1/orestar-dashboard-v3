@@ -98,7 +98,7 @@ function ccRenderComposition(elId, sum_, cycleA, cycleB, elapsedNote) {
   if (inst) inst.dispose();
   const chart = echarts.init(el, null, { renderer: "svg" });
   chart.setOption({
-    grid: { left: 178, right: 40, top: 30, bottom: 24 },
+    grid: ccCategoryGrid(30, 24),
     legend: { top: 0, data: [`${cycleA} cycle${elapsedNote}`, `${cycleB} cycle`] },
     tooltip: {
       trigger: "axis", axisPointer: { type: "shadow" },
@@ -109,7 +109,7 @@ function ccRenderComposition(elId, sum_, cycleA, cycleB, elapsedNote) {
     xAxis: { type: "value", axisLabel: { formatter: "{value}%", color: "#718096" },
              splitLine: { lineStyle: { color: "#edf2f7" } } },
     yAxis: { type: "category", data: types, inverse: true,
-             axisLabel: { color: "#4a5568" }, axisLine: { lineStyle: { color: "#e2e8f0" } } },
+             axisLabel: ccCategoryLabel(), axisLine: { lineStyle: { color: "#e2e8f0" } } },
     series: [
       { name: `${cycleA} cycle${elapsedNote}`, type: "bar", data: a,
         itemStyle: { color: CC_PALETTE[0], borderRadius: [0, 4, 4, 0] }, barGap: "10%" },
@@ -237,6 +237,34 @@ function ccCumulativeByDay(daily, daysA, shiftYears) {
   return out;
 }
 
+/** Category-axis layout for the composition charts: long type names need
+ *  178px on a wide screen; on a phone they are capped and truncated so the
+ *  bars keep most of the width. app.js redraws on crossing the breakpoint. */
+const ccPhone = () => typeof IS_MOBILE !== "undefined" && IS_MOBILE;
+const ccCategoryGrid = (top, bottom) => ccPhone()
+  ? { left: 4, right: 16, top, bottom, containLabel: true }
+  : { left: 178, right: 40, top, bottom };
+const ccCategoryLabel = () => ccPhone()
+  ? { color: "#4a5568", width: 110, overflow: "truncate", fontSize: 11 }
+  : { color: "#4a5568" };
+
+/**
+ * A caption above a comparison chart, as page text rather than drawn into the
+ * chart: drawn text keeps the width it had when the chart was first drawn,
+ * so after a rotation it ran off a phone screen. Pass null to hide it.
+ */
+function ccCaption(host, lines) {
+  let box = document.getElementById(`${host.id}-caption`);
+  if (!box) {
+    box = document.createElement("div");
+    box.id = `${host.id}-caption`;
+    box.className = "cc-caption";
+    host.parentNode.insertBefore(box, host);
+  }
+  box.hidden = !lines || host.hidden;
+  box.innerHTML = (lines || []).map(([cls, text]) => `<p class="${cls}">${esc(text)}</p>`).join("");
+}
+
 const ccShortDate = (d, withYear = true) => {
   const [y, m, day] = d.split("-").map(Number);
   return new Date(y, m - 1, day).toLocaleDateString("en-US",
@@ -268,17 +296,14 @@ function ccRenderCashFlowDaily(elId, dailyA, dailyB, cycleA, cycleB) {
   const headline = `Through ${ccShortDate(last)}: ${ccFmt$(a)}  ·  through ${ccShortDate(lastB)}: ${ccFmt$(b)}${pct}`;
 
   const names = [`${cycleA} so far`, `${cycleB} same day`, `${cycleB} full cycle`];
+  ccCaption(el, [
+    ["cc-headline", headline],
+    // Recent gifts are still being reported; the past cycle's are all in.
+    ["cmp-note", "Committees report gifts up to 30 days after receiving them (7 days in the last six weeks before an election), so the latest weeks of this cycle are still filling in."],
+  ]);
   chart.setOption({
-    grid: { left: 76, right: 24, top: 74, bottom: 36 },
+    grid: { left: 76, right: 24, top: 30, bottom: 36 },
     legend: { top: 0, data: names },
-    graphic: [
-      { type: "text", left: 0, top: 26, silent: true,
-        style: { text: headline, fill: "#2d3748", fontSize: 13, fontWeight: 600 } },
-      // Recent gifts are still being reported; the past cycle's are all in.
-      { type: "text", left: 0, top: 46, silent: true,
-        style: { text: "Committees report gifts up to 30 days after receiving them (7 days in the last six weeks before an election), so the latest weeks of this cycle are still filling in.",
-                 fill: "#718096", fontSize: 11, width: Math.max(el.clientWidth - 8, 200), overflow: "truncate" } },
-    ],
     tooltip: {
       trigger: "axis",
       formatter: ps => {
@@ -298,8 +323,9 @@ function ccRenderCashFlowDaily(elId, dailyA, dailyB, cycleA, cycleB) {
       type: "category", data: days, boundaryGap: false,
       axisLabel: {
         color: "#718096",
-        // Quarter starts only — 731 daily labels would be a smear.
-        interval: (i, v) => v.endsWith("-01") && [12, 3, 6, 9].includes(+v.slice(5, 7)),
+        // Quarter starts only — 731 daily labels would be a smear — and half
+        // years on a phone, where four a year still ran together.
+        interval: (i, v) => v.endsWith("-01") && (ccPhone() ? [12, 6] : [12, 3, 6, 9]).includes(+v.slice(5, 7)),
         formatter: v => new Date(+v.slice(0, 4), +v.slice(5, 7) - 1, 1)
           .toLocaleDateString("en-US", { month: "short", year: "2-digit" }),
       },
@@ -339,7 +365,10 @@ async function ccDrawCash(cur, cycle, elapsed) {
   const [a, b] = await Promise.all([ccFetchDaily(cur, ids), ccFetchDaily(cycle, ids)]);
   if (pick !== ccCashPick) return;                         // a later pick wins
   if (a && b) ccRenderCashFlowDaily("cc-cash-chart", a, b, cur, cycle);
-  else ccRenderCashFlow("cc-cash-chart", ccTimeline(), cur, cycle, elapsed);
+  else {
+    ccCaption(document.getElementById("cc-cash-chart"), null);
+    ccRenderCashFlow("cc-cash-chart", ccTimeline(), cur, cycle, elapsed);
+  }
 }
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
@@ -480,6 +509,8 @@ function initCycleCompare() {
     if (!host) return;
     host.hidden = !cycle;
     if (orig) orig.hidden = !!cycle;
+    const caption = document.getElementById(`${hostId}-caption`);
+    if (caption) caption.hidden = !cycle;
     if (cycle) draw();
     // A chart sized while display:none comes back 0×0, so re-measure on reveal.
     const shown = cycle ? host : orig;
@@ -508,14 +539,6 @@ function initCycleCompare() {
   // A scope set before the controls existed (a committee page opened first)
   // still has to hide the controls it does not support.
   ccApplyScope();
-
-  window.addEventListener("resize", () => {
-    ["cc-donortype-chart", "cc-party-chart", "cc-cash-chart"].forEach(id => {
-      const el = document.getElementById(id);
-      const c = el && !el.hidden && echarts.getInstanceByDom(el);
-      if (c) c.resize();
-    });
-  });
 }
 
 // ── Party composition ───────────────────────────────────────────────────────
@@ -560,6 +583,8 @@ function ccPartySums(party, year) {
 function ccRenderParty(elId, cycleA, cycleB) {
   const el = document.getElementById(elId);
   if (!el) return;
+  // Say plainly what the window is — the source is yearly, not monthly.
+  ccCaption(el, [["cmp-note", "Share of each party's own total · cycle read as its two calendar years"]]);
   const parties = Object.keys(CC_PARTY_COLOR);
   const sums = {};
   for (const p of parties) for (const y of [cycleA, cycleB]) sums[`${p}|${y}`] = ccPartySums(p, y);
@@ -589,18 +614,14 @@ function ccRenderParty(elId, cycleA, cycleB) {
   }
 
   chart.setOption({
-    grid: { left: 178, right: 40, top: 56, bottom: 24 },
+    grid: ccCategoryGrid(ccPhone() ? 52 : 30, 24),
     legend: { top: 0, itemGap: 14 },
-    // Say plainly what the window is — the source is yearly, not monthly.
-    graphic: [{ type: "text", left: 0, top: 30, silent: true,
-      style: { text: `Share of each party's own total · cycle read as its two calendar years`,
-               fill: "#718096", fontSize: 11 } }],
     tooltip: { trigger: "axis", axisPointer: { type: "shadow" },
                valueFormatter: v => ccPct(v || 0) },
     xAxis: { type: "value", axisLabel: { formatter: "{value}%", color: "#718096" },
              splitLine: { lineStyle: { color: "#edf2f7" } } },
     yAxis: { type: "category", data: types, inverse: true,
-             axisLabel: { color: "#4a5568" }, axisLine: { lineStyle: { color: "#e2e8f0" } } },
+             axisLabel: ccCategoryLabel(), axisLine: { lineStyle: { color: "#e2e8f0" } } },
     series,
   });
   chart.resize();

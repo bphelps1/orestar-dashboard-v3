@@ -2447,3 +2447,79 @@ footer a:hover { color: var(--color-accent); }
 .disc-row.disc-cert { background: #ebf4ff; }
 .disc-row.disc-cert .disc-col-diff,
 .disc-detail-row.disc-cert .disc-col-diff { color: #2b6cb0; font-weight: 600; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   EDGE-TO-EDGE LAYOUT
+   Charts and tables span the page instead of sitting in bordered tiles, and
+   the page spans the screen instead of a 1280px column. Sections are set apart
+   by a heading and a thin rule. On a phone each chart gains the ~50px the
+   tile's padding and border used to take.
+
+   Small cards that summarise (stat cards, race cards, committee cards) and
+   controls keep their borders: those are not charts or tables.
+   ════════════════════════════════════════════════════════════════════════ */
+:root { --max-w: none; }
+
+.chart-area,
+.campaign-pulse,
+.integrated-module,
+.table-wrapper {
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 20px 0 0;
+}
+.integrated-module:hover { border-color: var(--color-border); box-shadow: none; }
+.chart-area:has(.echart-container-radar) { padding: 20px 0 0; }
+
+/* Headings and searches that were inset from a tile's border sit flush. The
+   heading's old bottom border, drawn along the tile's inner edge, would now
+   underline the text itself. */
+.table-wrapper h2 { padding: 0 0 12px; border-bottom: 0; }
+.table-wrapper input.table-search { margin: 0 0 12px; }
+.table-header { padding: 0 0 12px; }
+
+.module-chart { padding: 0 0 20px; }
+
+/* On a phone a long header ("Total Received ($)") held the table wider than
+   the screen and pushed the amounts out of view. Let header labels wrap. */
+@media (max-width: 600px) {
+  .data-table th { white-space: normal; vertical-align: bottom; }
+}
+
+/* Panels inside a section lose their own boxes too. */
+.caucus-panel { border: 0; border-radius: 0; padding: 0; }
+.caucus-grid { gap: 1.5rem 2.5rem; }
+.rc-panel {
+  border: 0;
+  border-left: 1px solid var(--color-border-light);
+  border-radius: 0;
+  padding: 0 0 0 1rem;
+}
+@media (max-width: 860px) {
+  .rc-panel { border-left: 0; border-top: 1px solid var(--color-border-light); padding: 1rem 0 0; }
+}
+
+/* A chart draws into an inner box with a fixed pixel width. In a grid column
+   declared "1fr" (whose minimum is its content), that box held the column at
+   its landscape width after the phone turned back to portrait, so the whole
+   page stayed ~816px wide inside a 390px screen. Columns may shrink below
+   their content; chart boxes clip their drawing rather than prop a parent. */
+.echart-container, .echart-container-tall, .echart-container-compact,
+.echart-container-radar, #cmp-chart, #rc-map {
+  min-width: 0;
+  overflow: hidden;
+}
+.overview-charts > *, .rc-layout > *, .caucus-grid > *, .radar-layout > * { min-width: 0; }
+.overview-charts { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 860px) { .rc-layout { grid-template-columns: minmax(0, 1fr); } }
+/* Oregon is wider than tall: at phone width 480px left empty bands around it. */
+@media (max-width: 600px) { #rc-map { height: 380px; } }
+@media (max-width: 760px) { .caucus-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* Captions moved out of the comparison charts (cyclecompare.js). */
+.cc-caption { margin: 0 0 .4rem; }
+.cc-caption .cc-headline { font-size: .9rem; font-weight: 600; color: #2d3748; margin: 0; }
+.cc-caption .cmp-note { margin: .1rem 0 0; }

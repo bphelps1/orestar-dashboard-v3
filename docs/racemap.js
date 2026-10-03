@@ -206,7 +206,6 @@ async function initRaceMap(snapshot) {
 
   rcChart = echarts.init(box, null, { renderer: "svg" });
   rcChart.on("click", p => { if (p.componentType === "series") rcShowDistrict(p.name); });
-  window.addEventListener("resize", () => rcChart && rcChart.resize());
   document.getElementById("rc-chamber").addEventListener("click", e => {
     const b = e.target.closest("button[data-chamber]");
     if (b) rcLoadChamber(b.dataset.chamber);

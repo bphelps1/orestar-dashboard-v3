@@ -6,11 +6,12 @@
   <title>Donor Lookup — Oregon Campaign Finance</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="lib/charts.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="lib/donor-names.js"></script>
   <script src="lib/supabase.js"></script>
   <style>
-    .dn-wrap { max-width: 1100px; margin: 0 auto; padding: 1rem; }
+    .dn-wrap { margin: 0 auto; padding: 1rem var(--gutter); }
     .dn-search-box { position: relative; max-width: 640px; }
     .dn-search-box input {
       width: 100%; padding: .7rem .9rem; font-size: 1rem;
@@ -37,8 +38,8 @@
     .dn-card { background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: .8rem; text-align: center; }
     .dn-card-value { font-size: 1.25rem; font-weight: 700; }
     .dn-card-label { font-size: .75rem; color: #718096; text-transform: uppercase; letter-spacing: .03em; }
-    .dn-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1rem; }
-    @media (max-width: 760px) { .dn-cols { grid-template-columns: 1fr; } }
+    .dn-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; margin-top: 1rem; }
+    @media (max-width: 760px) { .dn-cols { grid-template-columns: minmax(0, 1fr); } }
     .dn-section h3 { font-size: 1rem; margin: 0 0 .5rem; }
     table.dn-table { border-collapse: collapse; width: 100%; font-size: .85rem; }
     .dn-table th, .dn-table td { padding: .4rem .55rem; border-bottom: 1px solid #edf2f7; text-align: left; }

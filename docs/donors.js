@@ -155,8 +155,6 @@ async function loadProfile(donorId) {
   }
 }
 
-let chartObserver = null;
-let chartResizeHandler = null;
 
 function renderChart(byYear) {
   const el = $("dn-chart");
@@ -164,19 +162,7 @@ function renderChart(byYear) {
   if (inst) inst.dispose();
   if (!byYear.length) { el.innerHTML = '<span class="dn-sub">No dated transactions.</span>'; return; }
   const chart = echarts.init(el, null, { renderer: "svg" });
-  // The container must be visible before init or it measures 0 wide and the
-  // chart stays squashed against the left edge. loadProfile unhides the
-  // profile first; this observer covers every other way the width can change
-  // (sidebar toggles, zoom) — plain window.resize does not fire when a hidden
-  // element becomes visible.
-  if (chartObserver) chartObserver.disconnect();
-  chartObserver = new ResizeObserver(() => chart.resize());
-  chartObserver.observe(el);
-  // Also bind window.resize: it covers the ordinary "user resized the window"
-  // case in environments where ResizeObserver is unavailable or inert.
-  if (chartResizeHandler) window.removeEventListener("resize", chartResizeHandler);
-  chartResizeHandler = () => chart.resize();
-  window.addEventListener("resize", chartResizeHandler);
+  // lib/charts.js keeps it sized from here: rotation, zoom, being revealed.
   chart.setOption({
     grid: { left: 70, right: 12, top: 12, bottom: 24 },
     xAxis: { type: "category", data: byYear.map(r => r.year) },

@@ -326,6 +326,5 @@ function initCompare() {
     renderCompareChart();
   });
 
-  window.addEventListener("resize", () => cmpChart && cmpChart.resize());
   renderCompareChart();
 }

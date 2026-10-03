@@ -9,7 +9,7 @@
   <script src="lib/donor-names.js"></script>
   <script src="lib/supabase.js"></script>
   <style>
-    .explore-wrap { max-width: 1200px; margin: 0 auto; padding: 1rem; }
+    .explore-wrap { margin: 0 auto; padding: 1rem var(--gutter); }
     .explore-intro { color: var(--text-muted, #555); margin: .25rem 0 1rem; }
     .xp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; }
     .xp-field { display: flex; flex-direction: column; gap: .25rem; }
@@ -25,7 +25,7 @@
     .xp-btn.secondary { background: #fff; color: #2b6cb0; }
     .xp-btn:disabled { opacity: .5; cursor: default; }
     .xp-status { color: #666; font-size: .85rem; margin-left: auto; }
-    .xp-table-wrap { overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; }
+    .xp-table-wrap { overflow-x: auto; border-top: 1px solid #e2e8f0; }
     table.xp-table { border-collapse: collapse; width: 100%; font-size: .85rem; }
     table.xp-table th, table.xp-table td { padding: .45rem .6rem; border-bottom: 1px solid #edf2f7; text-align: left; white-space: nowrap; }
     table.xp-table th { background: #f7fafc; position: sticky; top: 0; cursor: pointer; user-select: none; }
