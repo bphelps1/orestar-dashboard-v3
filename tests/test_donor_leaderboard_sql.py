@@ -1,8 +1,9 @@
 """Opt-in PostgreSQL regressions, isolated from all persistent application data.
 
-Run with ORESTAR_TEST_DB=1 and the usual SUPABASE_DB_URL configuration. Every
-table, view and function lives in this connection's pg_temp schema; teardown
-rolls back the entire fixture. The tests never run the refresh script's main.
+Run with ORESTAR_TEST_DB=1 and the database in ORESTAR_TEST_DB_URL (conftest
+blanks SUPABASE_DB_URL for the whole session). Every table, view and function
+lives in this connection's pg_temp schema; teardown rolls back the entire
+fixture. The tests never run the refresh script's main.
 """
 
 from __future__ import annotations
@@ -33,9 +34,11 @@ INKIND_SUBTYPES = (
 
 
 @pytest.fixture
-def db():
+def db(monkeypatch):
     import supabase_sync
 
+    if os.environ.get("ORESTAR_TEST_DB_URL"):
+        monkeypatch.setenv("SUPABASE_DB_URL", os.environ["ORESTAR_TEST_DB_URL"])
     try:
         conn = supabase_sync._connect(attempts=1)
     except Exception:
@@ -60,15 +63,26 @@ def db():
                     slug text primary key, filer_id text, detail jsonb
                 ) on commit drop;
             """)
-            migration = (ROOT / "supabase/migrations/014_donor_leaderboard.sql").read_text()
-            # Relocate the actual implementation instead of copying its logic.
-            migration = migration.replace("public.", "pg_temp.")
-            migration = migration.replace("set search_path = public", "set search_path = pg_temp")
-            # ACLs and the API schema notification are deployment-only steps.
-            migration = re.sub(r"^grant\b[^;]*;", "", migration, flags=re.MULTILINE)
-            migration = re.sub(r"^notify\b[^;]*;", "", migration, flags=re.MULTILINE)
-            assert "public." not in migration
-            cur.execute(migration)
+            # The refresh script stages from the cached view (042), which
+            # reads the identity map (027) and the bucket label (041); the
+            # tests here have no merges and no pooled refunds, so stubs do.
+            cur.execute("""
+                create temporary view donor_identity_map as
+                  select null::text as donor_id, null::text as canonical_id,
+                         null::text as canonical_name where false;
+                create function pg_temp.donor_bucket_label(value text)
+                  returns text language sql immutable as $$ select value $$;
+            """)
+            for name in ("014_donor_leaderboard.sql", "042_donor_contribution_sums.sql"):
+                migration = (ROOT / "supabase/migrations" / name).read_text()
+                # Relocate the actual implementation instead of copying its logic.
+                migration = migration.replace("public.", "pg_temp.")
+                migration = migration.replace("set search_path = public", "set search_path = pg_temp")
+                # ACLs and the API schema notification are deployment-only steps.
+                migration = re.sub(r"^(grant|revoke)\b[^;]*;", "", migration, flags=re.MULTILINE)
+                migration = re.sub(r"^notify\b[^;]*;", "", migration, flags=re.MULTILINE)
+                assert "public." not in migration
+                cur.execute(migration)
             yield cur
     finally:
         conn.rollback()
@@ -215,7 +229,10 @@ def test_refresh_builders_preserve_multi_id_profiles_and_other_account_fields(db
         ("empty", "no-transactions", json.dumps({**marker, "top_donors": [{"name": "Stale"}]})),
     ])
 
-    refresh.stage_donor_rows(db)
+    # Fills the (empty) per-year caches from pg_temp.transactions.
+    assert refresh.refresh_caches(db.connection, db, commit=False) == ([2025, 2026], [2025, 2026])
+    # A second pass finds every year unchanged and writes nothing.
+    assert refresh.refresh_caches(db.connection, db, commit=False) == ([], [])
     top = refresh.build_top_donors(db)
     assert indexed(top["all_time"])[MISC_KEY]["total"] == 30
     assert indexed(top["by_year"]["2025"])[MISC_KEY]["total"] == 10
@@ -237,3 +254,37 @@ def test_refresh_builders_preserve_multi_id_profiles_and_other_account_fields(db
     assert indexed(profiles["fallback"]["top_donors"])[MISC_KEY]["total"] == 20
     assert profiles["empty"]["top_donors"] == []
     assert profiles["empty"]["top_donors_by_year"] == {}
+
+
+def test_publication_keeps_keyed_donor_lists_and_takes_everything_else(db):
+    """process.py's publication writes raw-label donor lists; a committee that
+    already carries keyed lists from the last re-key keeps them (the re-key
+    rewrites only the committees whose giving changed), while every other
+    field, and a committee with no keyed lists, takes the new version."""
+    import supabase_sync
+    from psycopg2.extras import execute_values
+
+    keyed = [{"name": "Big PAC", "donor_id": "c1", "donor_key": "c1", "total": 500}]
+    db.executemany("insert into pg_temp.filer_detail values (%s, %s, %s::jsonb)", [
+        ("keyed", "one", json.dumps({"balance": 1, "top_donors": keyed,
+                                     "top_donors_by_year": {"2026": keyed}})),
+        ("raw", "two", json.dumps({"balance": 2, "top_donors": [{"name": "Old", "total": 1}],
+                                   "top_donors_by_year": {}})),
+    ])
+    raw = [{"name": "Big PAC", "total": 750}]
+    rows = [(slug, "Committee " + slug, slug, json.dumps({
+        "balance": 9, "top_donors": raw, "top_donors_by_year": {"2026": raw}, "new": True}))
+        for slug in ("keyed", "raw", "fresh")]
+    # The fixture's filer_detail has no name column; the statement is the one
+    # the publication runs, against a table that shadows the real one.
+    sql = supabase_sync._DETAIL_SQL.replace("(slug, name, filer_id, detail, updated_at)",
+                                            "(slug, filer_id, detail)")
+    sql = sql.replace("SET name=EXCLUDED.name,\n", "SET\n").replace(" updated_at=now(),", "")
+    execute_values(db, sql, [(r[0], r[2], r[3]) for r in rows], template="(%s, %s, %s::jsonb)")
+    db.execute("select slug, detail from pg_temp.filer_detail order by slug")
+    details = dict(db.fetchall())
+    assert details["keyed"]["top_donors"] == keyed
+    assert details["keyed"]["top_donors_by_year"] == {"2026": keyed}
+    assert details["keyed"]["balance"] == 9 and details["keyed"]["new"] is True
+    assert details["raw"]["top_donors"] == raw and details["raw"]["balance"] == 9
+    assert details["fresh"]["top_donors"] == raw

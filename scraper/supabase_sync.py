@@ -274,6 +274,13 @@ def upsert_transactions(df: pd.DataFrame) -> None:
             "ON COMMIT DROP"
         )
         _copy_frame(cur, "_txn_stage", frame)
+        # The years these rows land in, and the years the rows they replace
+        # were in (an amendment can move a date), for the donor cache.
+        cur.execute("""select coalesce(extract(year from tran_date)::int, 0) from _txn_stage
+                       union
+                       select coalesce(extract(year from t.tran_date)::int, 0)
+                       from transactions t join _txn_stage s on s.tran_id = t.tran_id""")
+        mark_donor_sum_years(cur, (row[0] for row in cur.fetchall()))
         col_list = ", ".join(f'"{c}"' for c in cols)
         cur.execute(
             f"INSERT INTO transactions ({col_list}) "
@@ -290,6 +297,9 @@ def delete_transactions(tran_ids) -> None:
     if not sync_enabled() or not ids:
         return
     with _connect() as conn, conn.cursor() as cur:
+        cur.execute("select distinct coalesce(extract(year from tran_date)::int, 0) "
+                    "from transactions where tran_id = any(%s)", (ids,))
+        mark_donor_sum_years(cur, (row[0] for row in cur.fetchall()))
         cur.execute("DELETE FROM transactions WHERE tran_id = ANY(%s)", (ids,))
         conn.commit()
     log.info("Supabase: deleted %d superseded transactions", len(ids))
@@ -377,7 +387,50 @@ def full_reload_transactions(shard_dir: Path) -> None:
                 cur.execute(indexdef)
                 log.info("Supabase: rebuilt index %s", name)
             cur.execute("ANALYZE transactions")
+            mark_donor_sum_years(cur, all_years=True)
     log.info("Supabase: full reload complete — %d transactions", total)
+
+
+# ── Donor contribution cache (migration 042) ─────────────────────────────────
+# refresh_donor_aggregates.py rebuilds donor_contribution_sums, a per-year
+# cache of the sums behind donor_contribution_rows, for the years listed in
+# donor_contribution_dirty instead of reading every transaction. Each writer of
+# `transactions` — the three above and resolve_donors.py — records the years it
+# touched, in the same transaction as its write. DIRTY_ALL means every year.
+DIRTY_ALL = -1
+_CACHE_MIGRATION = (Path(__file__).resolve().parent.parent
+                    / "supabase" / "migrations" / "042_donor_contribution_sums.sql")
+
+
+def ensure_donor_contribution_cache(cur) -> bool:
+    """Create the cache tables when a workflow that applies no migrations (the
+    daily refresh, for one) reaches them first. Returns True if it did."""
+    cur.execute("select to_regclass('donor_contribution_sums') is not null "
+                "and to_regclass('donor_contribution_dirty') is not null "
+                "and to_regclass('donor_year_totals') is not null "
+                "and to_regclass('donor_canonical_totals') is not null "
+                "and to_regclass('donor_contribution_rows_cached') is not null")
+    if cur.fetchone()[0]:
+        return False
+    cur.execute(_CACHE_MIGRATION.read_text())
+    log.info("Supabase: created the donor contribution cache (migration 042)")
+    return True
+
+
+def mark_donor_sum_years(cur, years=(), *, all_years: bool = False) -> None:
+    """Record the years of donor_contribution_sums the next re-key must rebuild.
+
+    `years` are calendar years (0 for undated rows); `all_years` after a bulk
+    write that may have touched any row, such as the resolver's restamp."""
+    ensure_donor_contribution_cache(cur)
+    if all_years:
+        cur.execute("insert into donor_contribution_dirty (yr) values (%s) "
+                    "on conflict do nothing", (DIRTY_ALL,))
+        return
+    marked = sorted({int(y) for y in years})
+    if marked:
+        cur.execute("insert into donor_contribution_dirty (yr) select unnest(%s::int[]) "
+                    "on conflict do nothing", (marked,))
 
 
 # ── Dashboard aggregate blobs ────────────────────────────────────────────────
@@ -473,9 +526,21 @@ _PUBLICATION = ContextVar("dashboard_publication", default=None)
 _CACHE_SQL = """INSERT INTO dashboard_cache (key, data, updated_at)
                 VALUES (%s, %s::jsonb, now()) ON CONFLICT (key) DO UPDATE
                 SET data=EXCLUDED.data, updated_at=now()"""
+# process.py rebuilds top_donors / top_donors_by_year from raw labels. A row
+# that already carries the keyed lists from the last re-key keeps them, so the
+# re-key then rewrites only committees whose giving changed, and a re-key that
+# fails leaves keyed (if stale) lists rather than unkeyed ones, which the
+# signed-in tools cannot read a contributor category from at all. A row with
+# no keyed lists takes the new ones; the re-key completes it either way.
 _DETAIL_SQL = """INSERT INTO filer_detail (slug, name, filer_id, detail, updated_at)
                  VALUES %s ON CONFLICT (slug) DO UPDATE SET name=EXCLUDED.name,
-                 filer_id=EXCLUDED.filer_id, detail=EXCLUDED.detail, updated_at=now()"""
+                 filer_id=EXCLUDED.filer_id, updated_at=now(), detail=CASE
+                   WHEN filer_detail.detail->'top_donors'->0 ? 'donor_key'
+                   THEN EXCLUDED.detail || jsonb_build_object(
+                     'top_donors', filer_detail.detail->'top_donors',
+                     'top_donors_by_year', coalesce(filer_detail.detail->'top_donors_by_year',
+                                                    EXCLUDED.detail->'top_donors_by_year'))
+                   ELSE EXCLUDED.detail END"""
 
 
 def _publish_dashboard(staged):
@@ -614,17 +679,8 @@ def bulk_upsert_filer_detail(rows: list[dict]) -> None:
         for r in rows
     ]
     with _connect() as conn, conn.cursor() as cur:
-        execute_values(
-            cur,
-            "INSERT INTO filer_detail (slug, name, filer_id, detail, updated_at) "
-            "VALUES %s "
-            "ON CONFLICT (slug) DO UPDATE SET "
-            "name = EXCLUDED.name, filer_id = EXCLUDED.filer_id, "
-            "detail = EXCLUDED.detail, updated_at = now()",
-            values,
-            template="(%s, %s, %s, %s::jsonb, now())",
-            page_size=500,
-        )
+        execute_values(cur, _DETAIL_SQL, values,
+                       template="(%s, %s, %s, %s::jsonb, now())", page_size=500)
         conn.commit()
     log.info("Supabase: upserted %d filer_detail rows", len(rows))
 

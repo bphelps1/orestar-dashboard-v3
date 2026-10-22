@@ -102,6 +102,7 @@ jobs:
         run: xvfb-run --auto-servernum python scraper/fetch.py --mode=misc-recent --days=56
 
       - name: Process and aggregate data (also syncs to Supabase)
+        id: process
         # 19-37 minutes over 18 runs (2026-09-08..22). A backend that dies
         # under the pooler never errors, so this is what ends the step.
         timeout-minutes: 75
@@ -112,10 +113,21 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_STORAGE_BUCKET: exports
 
+      # process.py has committed everything it produced, so the day's shards
+      # are published before the re-key: when the re-key timed out on
+      # 2026-10-19 and 2026-10-22 this step never ran and the next day started
+      # from the previous generation.
+      - name: Publish pipeline state
+        run: python scripts/pipeline_state.py push transactions auxiliary
+
       - name: Re-key donor aggregates onto resolved entities
         # process.py rebuilds these blobs from raw names; re-key them so the
         # Donors tab keeps showing merged entities between weekly resolves.
-        # Normally ~2.5 minutes (max 3.6 over 18 runs).
+        # Rebuilds only the years the day's rows touched (migration 042), so
+        # it no longer re-reads every transaction; the first run after the
+        # migration fills the whole cache. The blobs are in Postgres whether
+        # or not the publication above succeeded, so this runs either way.
+        if: ${{ !cancelled() && steps.process.outcome == 'success' }}
         timeout-minutes: 15
         run: python scraper/refresh_donor_aggregates.py
         env:
@@ -123,6 +135,3 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_STORAGE_BUCKET: exports
-
-      - name: Publish pipeline state
-        run: python scripts/pipeline_state.py push transactions auxiliary
