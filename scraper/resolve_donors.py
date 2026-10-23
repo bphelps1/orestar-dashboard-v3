@@ -677,6 +677,8 @@ def write_back(conn, df, assign, donors, aliases):
     log.info("Write-back: rebuilding donor_id index…")
     cur.execute("create index idx_txn_donor_id on transactions (donor_id)")
     cur.execute("drop table if exists _dmap")
+    # Any row's donor_id may have changed: the donor cache rebuilds every year.
+    sb.mark_donor_sum_years(cur, all_years=True)
     conn.commit()
 
     log.info("Write-back: donor aggregates…")
@@ -757,6 +759,10 @@ def assign_incremental(conn=None) -> None:
             return
         conn = sb._connect()
     cur = conn.cursor()
+    # Stamping changes these rows' donor_key: tell the donor cache which years.
+    cur.execute("""select distinct coalesce(extract(year from tran_date)::int, 0)
+                   from transactions where donor_id is null""")
+    sb.mark_donor_sum_years(cur, (row[0] for row in cur.fetchall()))
     cur.execute("""update transactions set donor_id = 'c' || contributor_payee_committee_id
                    where donor_id is null
                      and coalesce(contributor_payee_committee_id,'') <> ''""")
@@ -795,8 +801,10 @@ def assign_incremental(conn=None) -> None:
                             where donor_id is null and contributor_payee = %s
                               and coalesce(addr_line1,'') = %s and coalesce(zip,'') = %s""",
                          (did, raw, addr, zc))
-        conn.commit()
         log.info("Incremental: assigned %d new tuples", len(rows))
+    # Committed even when no name needed a lookup: the committee-id stamps and
+    # the cache marks above are part of this run either way.
+    conn.commit()
     if own:
         conn.close()
 

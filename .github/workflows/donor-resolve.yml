@@ -60,9 +60,11 @@ jobs:
 
       - name: Rebuild donor aggregates by resolved entity
         # Must follow the resolve: the Donors tab blobs are keyed by donor_id,
-        # so they are stale until the entities are rebuilt. ~2.2 minutes.
+        # so they are stale until the entities are rebuilt. The restamp can
+        # change any row, so every year of the contribution cache (migration
+        # 042) is rebuilt; the resolver marks them all and --full says so.
         timeout-minutes: 15
-        run: python scraper/refresh_donor_aggregates.py
+        run: python scraper/refresh_donor_aggregates.py --full
 
       # No pipeline-state publication here on purpose. resolve_donors.py upserts the
       # review queue to dashboard_cache('donor_review_queue'), which is what the

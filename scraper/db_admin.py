@@ -50,6 +50,10 @@ MIGRATIONS = [
     "039_daily_contributions.sql",
     # After 021 and 024, whose view and functions it replaces.
     "041_net_refunds_against_donors.sql",
+    # After 027 and 041: its cached view reads donor_identity_map and
+    # donor_bucket_label. refresh_donor_aggregates.py also applies it itself
+    # when a workflow that runs no migrations gets there first.
+    "042_donor_contribution_sums.sql",
     # Last on purpose: it patches the functions 027 and 029 define, so it has
     # to run after them on every apply.
     "032_merge_refresh_safe_deletes.sql",
